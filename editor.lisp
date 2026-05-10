@@ -68,6 +68,12 @@
 (defcfun ("attron"   %attron)   :int (a :unsigned-long))
 (defcfun ("attroff"  %attroff)  :int (a :unsigned-long))
 
+;;; color (extension symbols are looked up lazily; calls are guarded)
+(defcfun ("start_color"        %start-color)        :int)
+(defcfun ("init_pair"          %init-pair)          :int (pair :short) (fg :short) (bg :short))
+(defcfun ("has_colors"         %has-colors)         :int)
+(defcfun ("use_default_colors" %use-default-colors) :int)
+
 ;;; ncurses key codes (octal, same in every ncurses version)
 (defconstant +key-up+        #o403)
 (defconstant +key-down+      #o402)
@@ -89,18 +95,27 @@
 (defconstant +ctrl-q+ 17)
 (defconstant +ctrl-s+ 19)
 
+;;; ncurses base colors and the pair numbers we initialize in setup-colors
+(defconstant +color-black+   0)
+(defconstant +color-red+     1)
+(defconstant +color-green+   2)
+(defconstant +color-yellow+  3)
+(defconstant +color-blue+    4)
+(defconstant +color-magenta+ 5)
+(defconstant +color-cyan+    6)
+(defconstant +color-white+   7)
+
+(defconstant +pair-comment+ 1)
+(defconstant +pair-string+  2)
+(defconstant +pair-keyword+ 3)
+(defconstant +pair-number+  4)
+
 (defvar *stdscr* (null-pointer))
 (defun rows () (%getmaxy *stdscr*))
 (defun cols () (%getmaxx *stdscr*))
 
 (defun addstr-fit (s max-cols)
   (%addstr (subseq s 0 (min (length s) max-cols))))
-
-(defun addstr-window (s start width)
-  "Draw a horizontal slice of S of length WIDTH starting at column START."
-  (let* ((from (min start (length s)))
-         (to   (min (length s) (+ from width))))
-    (%addstr (subseq s from to))))
 
 ;;; ---------------------------------------------------------------
 ;;;  3.  Buffer
@@ -230,7 +245,253 @@
   (clamp-col))
 
 ;;; ---------------------------------------------------------------
-;;;  7.  Rendering
+;;;  7.  Syntax highlighting
+;;; ---------------------------------------------------------------
+
+(defvar *colors-enabled* nil)
+
+(defun setup-colors ()
+  "Initialize ncurses color pairs.  Silent no-op if the terminal lacks
+   color support; missing use_default_colors is tolerated."
+  (handler-case
+      (when (= 1 (%has-colors))
+        (%start-color)
+        (handler-case (%use-default-colors) (error () nil))
+        (%init-pair +pair-comment+ +color-cyan+    -1)
+        (%init-pair +pair-string+  +color-yellow+  -1)
+        (%init-pair +pair-keyword+ +color-magenta+ -1)
+        (%init-pair +pair-number+  +color-green+   -1)
+        (setf *colors-enabled* t))
+    (error () (setf *colors-enabled* nil))))
+
+(defmacro with-color-pair (pair &body body)
+  "Run BODY with the given color PAIR active.  PAIR may be NIL,
+   in which case BODY runs with no extra attribute."
+  (let ((p (gensym "P")))
+    `(let ((,p ,pair))
+       (when (and ,p *colors-enabled*) (%attron (ash ,p 8)))
+       (unwind-protect (progn ,@body)
+         (when (and ,p *colors-enabled*) (%attroff (ash ,p 8)))))))
+
+(defun token-pair (kind)
+  (case kind
+    (:comment +pair-comment+)
+    (:string  +pair-string+)
+    (:keyword +pair-keyword+)
+    (:number  +pair-number+)
+    (otherwise nil)))
+
+(defparameter *defun-likes*
+  '("defun" "defmacro" "defvar" "defparameter" "defconstant"
+    "defstruct" "defclass" "defmethod" "defgeneric" "defpackage"
+    "let" "let*" "if" "when" "unless" "cond" "case" "ecase" "typecase"
+    "progn" "prog1" "prog2" "dolist" "dotimes" "loop" "lambda"
+    "handler-case" "handler-bind" "unwind-protect" "with-open-file"
+    "multiple-value-bind" "multiple-value-call" "multiple-value-list"
+    "destructuring-bind" "eval-when" "in-package" "labels" "flet"
+    "block" "return-from" "return" "tagbody" "go" "throw" "catch"
+    "setf" "setq" "psetq" "and" "or" "not" "function" "quote"))
+
+(defun keyword-form-p (s)
+  (member s *defun-likes* :test #'string-equal))
+
+(defun symbol-char-p (c)
+  (or (alphanumericp c)
+      (find c "!?*+/<=>:-_$%&^~." :test #'char=)))
+
+(defun tokenize-line (line in-string in-block)
+  "Scan LINE with continuation state from preceding lines.
+   Returns: tokens new-in-string new-in-block.
+   Tokens are (start end kind), kind in {:comment :string :keyword :number}.
+   IN-STRING is bool; IN-BLOCK is the #| ... |# nesting depth (0 if none)."
+  (let ((tokens '())
+        (i 0)
+        (n (length line))
+        (after-paren nil))
+    (loop while (< i n) do
+      (cond
+        ;; inside an open #| ... |# block comment (CL block comments nest)
+        ((> in-block 0)
+         (let ((seg-start i))
+           (loop while (and (< i n) (> in-block 0)) do
+             (cond
+               ((and (< (1+ i) n)
+                     (char= (char line i) #\#)
+                     (char= (char line (1+ i)) #\|))
+                (incf in-block) (incf i 2))
+               ((and (< (1+ i) n)
+                     (char= (char line i) #\|)
+                     (char= (char line (1+ i)) #\#))
+                (decf in-block) (incf i 2))
+               (t (incf i))))
+           (push (list seg-start i :comment) tokens))
+         (setf after-paren nil))
+
+        ;; inside an unterminated "..." string
+        (in-string
+         (let ((seg-start i))
+           (loop while (< i n) do
+             (let ((c (char line i)))
+               (cond
+                 ((char= c #\\)
+                  (incf i)
+                  (when (< i n) (incf i)))
+                 ((char= c #\")
+                  (incf i)
+                  (setf in-string nil)
+                  (return))
+                 (t (incf i)))))
+           (push (list seg-start i :string) tokens))
+         (setf after-paren nil))
+
+        (t
+         (let ((c (char line i)))
+           (cond
+             ;; line comment to end-of-line
+             ((char= c #\;)
+              (push (list i n :comment) tokens)
+              (setf i n)
+              (setf after-paren nil))
+
+             ;; block comment start
+             ((and (< (1+ i) n)
+                   (char= c #\#)
+                   (char= (char line (1+ i)) #\|))
+              (let ((seg-start i))
+                (incf i 2)
+                (incf in-block)
+                (loop while (and (< i n) (> in-block 0)) do
+                  (cond
+                    ((and (< (1+ i) n)
+                          (char= (char line i) #\#)
+                          (char= (char line (1+ i)) #\|))
+                     (incf in-block) (incf i 2))
+                    ((and (< (1+ i) n)
+                          (char= (char line i) #\|)
+                          (char= (char line (1+ i)) #\#))
+                     (decf in-block) (incf i 2))
+                    (t (incf i))))
+                (push (list seg-start i :comment) tokens))
+              (setf after-paren nil))
+
+             ;; #\X character literal — skip 3 chars so a paren or " inside it doesn't confuse us
+             ((and (< (+ i 2) n)
+                   (char= c #\#)
+                   (char= (char line (1+ i)) #\\))
+              (incf i 3)
+              (setf after-paren nil))
+
+             ;; string
+             ((char= c #\")
+              (let ((seg-start i))
+                (incf i)
+                (setf in-string t)
+                (loop while (< i n) do
+                  (let ((c2 (char line i)))
+                    (cond
+                      ((char= c2 #\\)
+                       (incf i)
+                       (when (< i n) (incf i)))
+                      ((char= c2 #\")
+                       (incf i)
+                       (setf in-string nil)
+                       (return))
+                      (t (incf i)))))
+                (push (list seg-start i :string) tokens))
+              (setf after-paren nil))
+
+             ;; whitespace
+             ((or (char= c #\Space) (char= c #\Tab))
+              (incf i))
+
+             ;; open paren — flag the next symbol as keyword candidate
+             ((char= c #\()
+              (incf i)
+              (setf after-paren t))
+
+             ;; close paren
+             ((char= c #\))
+              (incf i)
+              (setf after-paren nil))
+
+             ;; number
+             ((or (digit-char-p c)
+                  (and (or (char= c #\+) (char= c #\-))
+                       (< (1+ i) n)
+                       (digit-char-p (char line (1+ i)))))
+              (let ((seg-start i))
+                (incf i)
+                (loop while (and (< i n)
+                                 (let ((cc (char line i)))
+                                   (or (digit-char-p cc)
+                                       (char= cc #\.)
+                                       (char= cc #\/)
+                                       (char= cc #\e)
+                                       (char= cc #\E))))
+                      do (incf i))
+                (push (list seg-start i :number) tokens))
+              (setf after-paren nil))
+
+             ;; symbol — emit as :keyword if it is the operator of a form
+             ((symbol-char-p c)
+              (let ((seg-start i))
+                (loop while (and (< i n) (symbol-char-p (char line i)))
+                      do (incf i))
+                (when (and after-paren
+                           (keyword-form-p (subseq line seg-start i)))
+                  (push (list seg-start i :keyword) tokens)))
+              (setf after-paren nil))
+
+             ;; anything else — skip one char
+             (t
+              (incf i)
+              (setf after-paren nil)))))))
+    (values (nreverse tokens) in-string in-block)))
+
+(defun state-at-line (line-index)
+  "Return (in-string in-block) at the start of LINE-INDEX by folding
+   tokenize-line over preceding lines."
+  (let ((in-string nil) (in-block 0))
+    (loop for i from 0 below line-index do
+      (multiple-value-bind (toks new-str new-blk)
+          (tokenize-line (nth i (buf-lines *buf*)) in-string in-block)
+        (declare (ignore toks))
+        (setf in-string new-str in-block new-blk)))
+    (values in-string in-block)))
+
+(defun render-line-with-tokens (line tokens left width)
+  "Draw the slice [LEFT, LEFT+WIDTH) of LINE, applying TOKEN colors.
+   Tokens must be sorted by start and non-overlapping."
+  (let* ((len (length line))
+         (end (min len (+ left width)))
+         (toks tokens)
+         (cursor left))
+    ;; drop tokens entirely before the viewport
+    (loop while (and toks (<= (second (first toks)) cursor))
+          do (setf toks (rest toks)))
+    (loop while (< cursor end) do
+      (let ((tok (first toks)))
+        (cond
+          ;; no more tokens — emit the rest as default-colored
+          ((null tok)
+           (%addstr (subseq line cursor end))
+           (setf cursor end))
+          ;; we're inside (or at the start of) the next token
+          ((<= (first tok) cursor)
+           (let ((tok-end (min end (second tok))))
+             (with-color-pair (token-pair (third tok))
+               (%addstr (subseq line cursor tok-end)))
+             (setf cursor tok-end)
+             (when (>= cursor (second tok))
+               (setf toks (rest toks)))))
+          ;; gap of default-colored text before the next token
+          (t
+           (let ((gap-end (min end (first tok))))
+             (%addstr (subseq line cursor gap-end))
+             (setf cursor gap-end))))))))
+
+;;; ---------------------------------------------------------------
+;;;  8.  Rendering
 ;;; ---------------------------------------------------------------
 
 (defun render (flash)
@@ -265,14 +526,18 @@
                   ncols))
     (%attroff +a-reverse+)
 
-    ;; text lines (sliced by horizontal offset)
-    (loop for sr from 0 below text-rows
-          for lr = (+ sr (buf-top *buf*))
-          do (%move (1+ sr) 0)
-             (%clrtoeol)
-             (when (< lr (line-count))
-               (addstr-window (nth lr (buf-lines *buf*))
-                              (buf-left *buf*) ncols)))
+    ;; text lines, syntax-highlighted, sliced by horizontal offset
+    (multiple-value-bind (st-str st-blk) (state-at-line (buf-top *buf*))
+      (loop for sr from 0 below text-rows
+            for lr = (+ sr (buf-top *buf*))
+            do (%move (1+ sr) 0)
+               (%clrtoeol)
+               (when (< lr (line-count))
+                 (let ((line (nth lr (buf-lines *buf*))))
+                   (multiple-value-bind (toks new-str new-blk)
+                       (tokenize-line line st-str st-blk)
+                     (render-line-with-tokens line toks (buf-left *buf*) ncols)
+                     (setf st-str new-str st-blk new-blk))))))
 
     ;; status bar
     (%move (1- nrows) 0)
@@ -291,7 +556,7 @@
     (%refresh)))
 
 ;;; ---------------------------------------------------------------
-;;;  8.  Mini-prompt on status bar
+;;;  9.  Mini-prompt on status bar
 ;;; ---------------------------------------------------------------
 
 (defun mini-prompt (prompt-str)
@@ -315,7 +580,7 @@
            (setf input (concatenate 'string input (string (code-char k))))))))))
 
 ;;; ---------------------------------------------------------------
-;;;  9.  Key dispatch
+;;;  10. Key dispatch
 ;;; ---------------------------------------------------------------
 
 (defun handle-key (k)
@@ -366,7 +631,7 @@
     (t nil)))
 
 ;;; ---------------------------------------------------------------
-;;;  10. Main loop
+;;;  11. Main loop
 ;;; ---------------------------------------------------------------
 
 (defun run (&optional filename)
@@ -381,6 +646,7 @@
   (%noecho)
   (%cbreak)
   (%keypad *stdscr* 1)
+  (setup-colors)
 
   (let ((flash nil) (flash-ttl 0))
     (unwind-protect
