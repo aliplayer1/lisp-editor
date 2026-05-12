@@ -109,6 +109,7 @@
 (defconstant +pair-string+  2)
 (defconstant +pair-keyword+ 3)
 (defconstant +pair-number+  4)
+(defconstant +pair-match+   5)
 
 (defvar *stdscr* (null-pointer))
 (defun rows () (%getmaxy *stdscr*))
@@ -245,7 +246,7 @@
   (clamp-col))
 
 ;;; ---------------------------------------------------------------
-;;;  7.  Syntax highlighting
+;;;  7.  Syntax highlighting & paren matching
 ;;; ---------------------------------------------------------------
 
 (defvar *colors-enabled* nil)
@@ -261,6 +262,7 @@
         (%init-pair +pair-string+  +color-yellow+  -1)
         (%init-pair +pair-keyword+ +color-magenta+ -1)
         (%init-pair +pair-number+  +color-green+   -1)
+        (%init-pair +pair-match+   +color-white+   +color-red+)
         (setf *colors-enabled* t))
     (error () (setf *colors-enabled* nil))))
 
@@ -374,11 +376,13 @@
                 (push (list seg-start i :comment) tokens))
               (setf after-paren nil))
 
-             ;; #\X character literal — skip 3 chars so a paren or " inside it doesn't confuse us
+             ;; #\X character literal — emit a token so its paren/quote isn't matched
              ((and (< (+ i 2) n)
                    (char= c #\#)
                    (char= (char line (1+ i)) #\\))
-              (incf i 3)
+              (let ((seg-start i))
+                (incf i 3)
+                (push (list seg-start i :char) tokens))
               (setf after-paren nil))
 
              ;; string
@@ -490,6 +494,117 @@
              (%addstr (subseq line cursor gap-end))
              (setf cursor gap-end))))))))
 
+;;; ----- Paren matching -------------------------------------------
+
+(defun paren-skippable-p (col toks)
+  "True if COL is inside a span that should not participate in paren
+   matching: strings, comments, and character literals (#\\()."
+  (some (lambda (tk)
+          (and (<= (first tk) col)
+               (< col (second tk))
+               (or (eq (third tk) :string)
+                   (eq (third tk) :comment)
+                   (eq (third tk) :char))))
+        toks))
+
+(defun paren-info (row col)
+  "Return :open, :close, or NIL for the char at (ROW, COL).
+   A paren inside a string or comment returns NIL."
+  (let ((line (nth row (buf-lines *buf*))))
+    (when (and line (< col (length line)))
+      (let ((c (char line col)))
+        (when (or (char= c #\() (char= c #\)))
+          (multiple-value-bind (st-str st-blk) (state-at-line row)
+            (let ((toks (tokenize-line line st-str st-blk)))
+              (unless (paren-skippable-p col toks)
+                (if (char= c #\() :open :close)))))))))
+
+(defun walk-paren-forward (start-row start-col)
+  "From the open paren at (START-ROW, START-COL), find the matching close.
+   Returns (values match-row match-col) or NIL if unbalanced."
+  (let* ((lines (buf-lines *buf*))
+         (nlines (length lines))
+         (depth 1)
+         (row start-row)
+         (col (1+ start-col)))
+    (multiple-value-bind (st-str st-blk) (state-at-line start-row)
+      (loop while (< row nlines) do
+        (let ((line (nth row lines)))
+          (multiple-value-bind (toks new-str new-blk)
+              (tokenize-line line st-str st-blk)
+            (let ((n (length line)))
+              (loop while (< col n) do
+                (unless (paren-skippable-p col toks)
+                  (let ((c (char line col)))
+                    (cond
+                      ((char= c #\() (incf depth))
+                      ((char= c #\))
+                       (decf depth)
+                       (when (zerop depth)
+                         (return-from walk-paren-forward
+                           (values row col)))))))
+                (incf col)))
+            (setf st-str new-str st-blk new-blk)))
+        (incf row)
+        (setf col 0)))
+    nil))
+
+(defun walk-paren-backward (start-row start-col)
+  "From the close paren at (START-ROW, START-COL), find the matching open.
+   We sweep from the top of the buffer to just before (START-ROW, START-COL),
+   collecting all real paren positions in reverse order, then walk them with
+   a depth counter."
+  (let ((reals '())
+        (st-str nil)
+        (st-blk 0))
+    (loop for row from 0 to start-row do
+      (let ((line (nth row (buf-lines *buf*))))
+        (multiple-value-bind (toks new-str new-blk)
+            (tokenize-line line st-str st-blk)
+          (let ((bound (if (= row start-row) start-col (length line))))
+            (dotimes (col bound)
+              (let ((c (char line col)))
+                (when (and (or (char= c #\() (char= c #\)))
+                           (not (paren-skippable-p col toks)))
+                  (push (list row col c) reals)))))
+          (setf st-str new-str st-blk new-blk))))
+    ;; REALS is most-recent-first (push order), so iterating it walks
+    ;; backward from just before (START-ROW, START-COL).
+    (let ((depth 1))
+      (dolist (p reals)
+        (let ((c (third p)))
+          (cond
+            ((char= c #\)) (incf depth))
+            ((char= c #\()
+             (decf depth)
+             (when (zerop depth)
+               (return-from walk-paren-backward
+                 (values (first p) (second p)))))))))
+    nil))
+
+(defun find-paren-match (row col)
+  "Return (values match-row match-col) for the paren at (ROW, COL),
+   or NIL if there is no match (no paren, in string/comment, unbalanced)."
+  (case (paren-info row col)
+    (:open  (walk-paren-forward row col))
+    (:close (walk-paren-backward row col))
+    (otherwise nil)))
+
+(defun overlay-paren-highlight (row col)
+  "If (ROW, COL) is in the visible viewport, redraw its single char with
+   +pair-match+ active.  Caller is responsible for restoring the cursor."
+  (let* ((nrows (rows)) (ncols (cols))
+         (text-rows (- nrows 2))
+         (top (buf-top *buf*)) (left (buf-left *buf*))
+         (sr (- row top)) (sc (- col left)))
+    (when (and (>= sr 0) (< sr text-rows)
+               (>= sc 0) (< sc ncols))
+      (let ((line (nth row (buf-lines *buf*))))
+        (when (and line (< col (length line)))
+          (%move (1+ sr) sc)
+          (with-color-pair +pair-match+
+            (%addstr (string (char line col)))))))))
+
 ;;; ---------------------------------------------------------------
 ;;;  8.  Rendering
 ;;; ---------------------------------------------------------------
@@ -549,6 +664,13 @@
                   (make-string ncols :initial-element #\Space))
      ncols)
     (%attroff +a-reverse+)
+
+    ;; paren match overlay — repaint the cursor paren and its partner
+    ;; with +pair-match+ so they stand out.  No-op when not on a paren.
+    (multiple-value-bind (mr mc) (find-paren-match brow bcol)
+      (when mr
+        (overlay-paren-highlight brow bcol)
+        (overlay-paren-highlight mr   mc)))
 
     ;; cursor
     (%move (1+ (- brow (buf-top *buf*)))
