@@ -16,3 +16,10 @@
 *.sx32fsl
 *.wx64fsl
 *.wx32fsl
+
+# Misc.
+docs/
+
+# Tests
+tests/
+test*
