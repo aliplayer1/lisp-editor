@@ -611,6 +611,38 @@
       (let ((top (first stack)))
         (values (first top) (second top))))))
 
+(defun compute-newline-indent (open-row open-col)
+  "Given the enclosing open-paren position, return the column the new
+   line should be indented to.  Three rules, in order:
+     - operator is in *defun-likes*  =>  open-col + 2
+     - first arg is on the same line =>  column of that arg
+     - operator at EOL or no operator =>  open-col + 1"
+  (let* ((line (nth open-row (buf-lines *buf*)))
+         (n    (length line))
+         (i    (1+ open-col)))
+    ;; tolerate stray whitespace right after `('
+    (loop while (and (< i n)
+                     (or (char= (char line i) #\Space)
+                         (char= (char line i) #\Tab)))
+          do (incf i))
+    (cond
+      ((>= i n) (1+ open-col))
+      (t
+       (let ((op-start i))
+         (loop while (and (< i n) (symbol-char-p (char line i)))
+               do (incf i))
+         (let ((op-end i))
+           (cond
+             ((= op-end op-start) (1+ open-col))
+             ((keyword-form-p (subseq line op-start op-end))
+              (+ open-col 2))
+             (t
+              (loop while (and (< i n)
+                               (or (char= (char line i) #\Space)
+                                   (char= (char line i) #\Tab)))
+                    do (incf i))
+              (if (< i n) i (1+ open-col))))))))))
+
 (defun find-paren-match (row col)
   "Return (values match-row match-col) for the paren at (ROW, COL),
    or NIL if there is no match (no paren, in string/comment, unbalanced)."
