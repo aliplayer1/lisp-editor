@@ -586,6 +586,31 @@
                  (values (first p) (second p)))))))))
     nil))
 
+(defun enclosing-open-paren (row col)
+  "Return (values OPEN-ROW OPEN-COL) of the innermost unclosed `(`
+   containing position (ROW, COL), or NIL if none.  Parens inside
+   strings, comments, and #\\X char literals are ignored, the same
+   way the existing paren walkers handle them."
+  (let ((stack '())
+        (st-str nil)
+        (st-blk 0))
+    (loop for r from 0 to row do
+      (let ((line (nth r (buf-lines *buf*))))
+        (multiple-value-bind (toks new-str new-blk)
+            (tokenize-line line st-str st-blk)
+          (let ((bound (if (= r row) col (length line))))
+            (dotimes (c bound)
+              (let ((ch (char line c)))
+                (when (and (or (char= ch #\() (char= ch #\)))
+                           (not (paren-skippable-p c toks)))
+                  (cond
+                    ((char= ch #\() (push (list r c) stack))
+                    ((char= ch #\)) (when stack (pop stack))))))))
+          (setf st-str new-str st-blk new-blk))))
+    (when stack
+      (let ((top (first stack)))
+        (values (first top) (second top))))))
+
 (defun find-paren-match (row col)
   "Return (values match-row match-col) for the paren at (ROW, COL),
    or NIL if there is no match (no paren, in string/comment, unbalanced)."
