@@ -249,6 +249,10 @@
 ;;;  7.  Syntax highlighting & paren matching
 ;;; ---------------------------------------------------------------
 
+(defvar *suppress-main* nil
+  "When non-nil, loading this file does NOT launch the UI.  Tests bind
+   this to T before LOAD so they can drive the pure functions.")
+
 (defvar *colors-enabled* nil)
 
 (defun setup-colors ()
@@ -792,4 +796,4 @@
          (file (when sep (nth (1+ sep) argv))))
     (run file)))
 
-(main)
+(unless *suppress-main* (main))
