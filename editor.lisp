@@ -188,7 +188,23 @@
                   (list (subseq ln col))
                   (subseq (buf-lines *buf*) (1+ row))))
     (incf (buf-row *buf*))
-    (setf (buf-col *buf*) 0  (buf-dirty *buf*) t)))
+    (setf (buf-col *buf*) 0  (buf-dirty *buf*) t)
+    ;; Auto-indent: if the new line continues a multi-line string or
+    ;; #|...|# block comment, leave it alone (auto-indent would corrupt
+    ;; the literal).  Otherwise, if the cursor is inside a Lisp form,
+    ;; prepend the right number of spaces.
+    (multiple-value-bind (in-str in-blk) (state-at-line (buf-row *buf*))
+      (unless (or in-str (plusp in-blk))
+        (multiple-value-bind (orow ocol)
+            (enclosing-open-paren (buf-row *buf*) 0)
+          (when orow
+            (let ((n (compute-newline-indent orow ocol)))
+              (when (plusp n)
+                (set-cur-line
+                 (concatenate 'string
+                              (make-string n :initial-element #\Space)
+                              (cur-line)))
+                (setf (buf-col *buf*) n)))))))))
 
 (defun delete-backward ()
   (let ((col (buf-col *buf*)) (row (buf-row *buf*)))
