@@ -87,13 +87,15 @@
 (defconstant +key-backspace+  #o407)
 (defconstant +a-reverse+     #x00040000)
 
-(defconstant +ctrl-a+  1)
-(defconstant +ctrl-d+  4)
-(defconstant +ctrl-e+  5)
-(defconstant +ctrl-n+ 14)
-(defconstant +ctrl-o+ 15)
-(defconstant +ctrl-q+ 17)
-(defconstant +ctrl-s+ 19)
+(defconstant +ctrl-a+          1)
+(defconstant +ctrl-d+          4)
+(defconstant +ctrl-e+          5)
+(defconstant +ctrl-n+         14)
+(defconstant +ctrl-o+         15)
+(defconstant +ctrl-q+         17)
+(defconstant +ctrl-r+         #o22)
+(defconstant +ctrl-s+         19)
+(defconstant +ctrl-underscore+ #o37)
 
 ;;; ncurses base colors and the pair numbers we initialize in setup-colors
 (defconstant +color-black+   0)
@@ -123,13 +125,15 @@
 ;;; ---------------------------------------------------------------
 
 (defstruct buf
-  (lines (list "") :type list)
-  (row   0        :type fixnum)
-  (col   0        :type fixnum)
-  (top   0        :type fixnum)
-  (left  0        :type fixnum)
+  (lines    (list "") :type list)
+  (row      0         :type fixnum)
+  (col      0         :type fixnum)
+  (top      0         :type fixnum)
+  (left     0         :type fixnum)
   (filename nil)
-  (dirty    nil))
+  (dirty    nil)
+  (undo     nil       :type list)
+  (redo     nil       :type list))
 
 (defvar *buf* (make-buf))
 
@@ -173,14 +177,74 @@
 ;;;  5.  Editing
 ;;; ---------------------------------------------------------------
 
+(defparameter *undo-limit* 200
+  "Maximum number of snapshots retained on the undo stack.")
+
+(defvar *last-cmd-was-insert* nil
+  "T iff the previous handle-key call was a printable insert.  Used by
+   insert-char to coalesce a run of single-char inserts into one undo
+   step.  Set/cleared by the run loop based on the keycode.")
+
+(defun snapshot ()
+  "Capture the current buffer state as a tuple (LINES ROW COL DIRTY).
+   Lines is COPY-LIST'd because set-cur-line mutates a cell in place
+   via (setf (nth ...)); without the copy the snapshot would track the
+   live buffer instead of the pre-edit state."
+  (list (copy-list (buf-lines *buf*))
+        (buf-row   *buf*)
+        (buf-col   *buf*)
+        (buf-dirty *buf*)))
+
+(defun restore (s)
+  "Restore the buffer state from a snapshot S."
+  (setf (buf-lines *buf*) (first  s)
+        (buf-row   *buf*) (second s)
+        (buf-col   *buf*) (third  s)
+        (buf-dirty *buf*) (fourth s)))
+
+(defun record-undo ()
+  "Push a snapshot of the current buffer state onto buf-undo, truncate
+   the stack to *undo-limit* entries, and clear buf-redo (a fresh edit
+   invalidates any pending redo)."
+  (push (snapshot) (buf-undo *buf*))
+  (when (> (length (buf-undo *buf*)) *undo-limit*)
+    (setf (buf-undo *buf*) (subseq (buf-undo *buf*) 0 *undo-limit*)))
+  (setf (buf-redo *buf*) nil))
+
+(defun do-undo ()
+  "Pop the top of buf-undo, save the current state onto buf-redo, and
+   restore the popped snapshot.  Returns NIL on success, or a flash
+   string if there is nothing to undo."
+  (if (null (buf-undo *buf*))
+      " Nothing to undo"
+      (let ((s (pop (buf-undo *buf*))))
+        (push (snapshot) (buf-redo *buf*))
+        (restore s)
+        nil)))
+
+(defun do-redo ()
+  "Pop the top of buf-redo, save the current state onto buf-undo, and
+   restore the popped snapshot.  Returns NIL on success, or a flash
+   string if there is nothing to redo."
+  (if (null (buf-redo *buf*))
+      " Nothing to redo"
+      (let ((s (pop (buf-redo *buf*))))
+        (push (snapshot) (buf-undo *buf*))
+        (restore s)
+        nil)))
+
 (defun insert-char (ch)
+  (unless *last-cmd-was-insert*
+    (record-undo))
   (let ((ln (cur-line)) (col (buf-col *buf*)))
     (set-cur-line (concatenate 'string
                                (subseq ln 0 col) (string ch) (subseq ln col)))
     (incf (buf-col *buf*))
-    (setf (buf-dirty *buf*) t)))
+    (setf (buf-dirty *buf*) t))
+  (setf *last-cmd-was-insert* t))
 
 (defun insert-newline ()
+  (record-undo)
   (let* ((ln (cur-line)) (col (buf-col *buf*)) (row (buf-row *buf*)))
     (set-cur-line (subseq ln 0 col))
     (setf (buf-lines *buf*)
@@ -207,6 +271,7 @@
                 (setf (buf-col *buf*) n)))))))))
 
 (defun delete-backward ()
+  (record-undo)
   (let ((col (buf-col *buf*)) (row (buf-row *buf*)))
     (cond
       ((> col 0)
@@ -226,6 +291,7 @@
     (setf (buf-dirty *buf*) t)))
 
 (defun delete-forward ()
+  (record-undo)
   (let* ((ln (cur-line)) (col (buf-col *buf*)) (row (buf-row *buf*)))
     (cond
       ((< col (length ln))
@@ -819,6 +885,9 @@
     ((= k +key-ppage+) (page-up   (- (rows) 3)) nil)
     ((= k +key-npage+) (page-down (- (rows) 3)) nil)
 
+    ((= k +ctrl-underscore+) (do-undo))
+    ((= k +ctrl-r+)          (do-redo))
+
     ((or (= k 10) (= k 13))               (insert-newline)   nil)
     ((or (= k 127) (= k 8)
          (= k +key-backspace+))            (delete-backward) nil)
@@ -854,6 +923,7 @@
           (when (plusp flash-ttl) (decf flash-ttl))
           (let* ((k      (%getch))
                  (result (handle-key k)))
+            (setf *last-cmd-was-insert* (and (>= k 32) (< k 127)))
             (cond
               ((eq result :quit) (return))
               ((stringp result)
