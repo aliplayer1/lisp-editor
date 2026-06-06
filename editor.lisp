@@ -63,6 +63,8 @@
 (defcfun ("addstr"   %addstr)   :int (s :string))
 (defcfun ("clrtoeol" %clrtoeol) :int)
 (defcfun ("getch"    %getch)    :int)
+(defcfun ("nodelay"  %nodelay)  :int  (win :pointer) (bf :int))
+(defcfun ("timeout"  %timeout)  :void (delay :int))
 (defcfun ("getmaxy"  %getmaxy)  :int (win :pointer))
 (defcfun ("getmaxx"  %getmaxx)  :int (win :pointer))
 (defcfun ("attron"   %attron)   :int (a :unsigned-long))
@@ -87,14 +89,19 @@
 (defconstant +key-backspace+  #o407)
 (defconstant +a-reverse+     #x00040000)
 
+(defconstant +ctrl-space+      0)
 (defconstant +ctrl-a+          1)
 (defconstant +ctrl-d+          4)
 (defconstant +ctrl-e+          5)
+(defconstant +ctrl-g+         #o07)
+(defconstant +ctrl-k+         #o13)
 (defconstant +ctrl-n+         14)
 (defconstant +ctrl-o+         15)
 (defconstant +ctrl-q+         17)
 (defconstant +ctrl-r+         #o22)
 (defconstant +ctrl-s+         19)
+(defconstant +ctrl-w+         #o27)
+(defconstant +ctrl-y+         #o31)
 (defconstant +ctrl-underscore+ #o37)
 
 ;;; ncurses base colors and the pair numbers we initialize in setup-colors
@@ -133,7 +140,9 @@
   (filename nil)
   (dirty    nil)
   (undo     nil       :type list)
-  (redo     nil       :type list))
+  (redo     nil       :type list)
+  (mark-row nil)
+  (mark-col nil))
 
 (defvar *buf* (make-buf))
 
@@ -236,6 +245,7 @@
 (defun insert-char (ch)
   (unless *last-cmd-was-insert*
     (record-undo))
+  (clear-mark)
   (let ((ln (cur-line)) (col (buf-col *buf*)))
     (set-cur-line (concatenate 'string
                                (subseq ln 0 col) (string ch) (subseq ln col)))
@@ -245,6 +255,7 @@
 
 (defun insert-newline ()
   (record-undo)
+  (clear-mark)
   (let* ((ln (cur-line)) (col (buf-col *buf*)) (row (buf-row *buf*)))
     (set-cur-line (subseq ln 0 col))
     (setf (buf-lines *buf*)
@@ -272,6 +283,7 @@
 
 (defun delete-backward ()
   (record-undo)
+  (clear-mark)
   (let ((col (buf-col *buf*)) (row (buf-row *buf*)))
     (cond
       ((> col 0)
@@ -292,6 +304,7 @@
 
 (defun delete-forward ()
   (record-undo)
+  (clear-mark)
   (let* ((ln (cur-line)) (col (buf-col *buf*)) (row (buf-row *buf*)))
     (cond
       ((< col (length ln))
@@ -303,6 +316,197 @@
              (append (subseq (buf-lines *buf*) 0 (1+ row))
                      (subseq (buf-lines *buf*) (+ row 2))))))
     (setf (buf-dirty *buf*) t)))
+
+;;; ---------------------------------------------------------------
+;;;  5a. Selection + kill ring
+;;; ---------------------------------------------------------------
+
+(defun set-mark ()
+  "Anchor the selection at the current cursor."
+  (setf (buf-mark-row *buf*) (buf-row *buf*)
+        (buf-mark-col *buf*) (buf-col *buf*)))
+
+(defun clear-mark ()
+  "Discard any active selection."
+  (setf (buf-mark-row *buf*) nil
+        (buf-mark-col *buf*) nil))
+
+(defun region-bounds ()
+  "Return (values start-row start-col end-row end-col) with start <= end,
+   or NIL if no mark is set.  An empty region (mark at cursor) returns four
+   equal values; callers guard emptiness themselves."
+  (let ((mr (buf-mark-row *buf*))
+        (mc (buf-mark-col *buf*))
+        (cr (buf-row *buf*))
+        (cc (buf-col *buf*)))
+    (when (and mr mc)
+      (if (or (< mr cr) (and (= mr cr) (< mc cc)))
+          (values mr mc cr cc)
+          (values cr cc mr mc)))))
+
+(defun region-text ()
+  "Return the selected text as one string with embedded #\\Newline.
+   Returns NIL when no region is active."
+  (multiple-value-bind (sr sc er ec) (region-bounds)
+    (when sr
+      (cond
+        ((= sr er)
+         (subseq (nth sr (buf-lines *buf*)) sc ec))
+        (t
+         (with-output-to-string (out)
+           (write-string (subseq (nth sr (buf-lines *buf*)) sc) out)
+           (loop for r from (1+ sr) below er do
+             (terpri out)
+             (write-string (nth r (buf-lines *buf*)) out))
+           (terpri out)
+           (write-string (subseq (nth er (buf-lines *buf*)) 0 ec) out)))))))
+
+(defun delete-region ()
+  "Remove the selected range from the buffer.  Cursor lands at the
+   region's start.  Clears the mark.  No-op if no region is active or
+   the region is empty."
+  (multiple-value-bind (sr sc er ec) (region-bounds)
+    (when (and sr (not (and (= sr er) (= sc ec))))
+      (let* ((lines  (buf-lines *buf*))
+             (start  (nth sr lines))
+             (end    (nth er lines))
+             (joined (concatenate 'string
+                                  (subseq start 0 sc)
+                                  (subseq end ec))))
+        (setf (buf-lines *buf*)
+              (append (subseq lines 0 sr)
+                      (list joined)
+                      (subseq lines (1+ er))))
+        (setf (buf-row *buf*) sr
+              (buf-col *buf*) sc
+              (buf-dirty *buf*) t)))
+    (clear-mark)))
+
+(defparameter *kill-ring-limit* 60
+  "Maximum number of entries retained on *kill-ring*.")
+
+(defvar *kill-ring* nil
+  "Most-recent-first list of killed strings.  Capped at *kill-ring-limit*.")
+
+(defvar *last-cmd-was-kill* nil
+  "T if the previous dispatched command was a kill operation.  Used to
+   coalesce consecutive kills into a single ring entry.")
+
+(defun ring-push (s)
+  "Push S onto *kill-ring*, truncating to *kill-ring-limit*."
+  (push s *kill-ring*)
+  (when (> (length *kill-ring*) *kill-ring-limit*)
+    (setf *kill-ring* (subseq *kill-ring* 0 *kill-ring-limit*))))
+
+(defun kill-region ()
+  "Push the selected text onto *kill-ring* and delete it.  No-op if no
+   region is active or it is empty.  Sets *last-cmd-was-kill* to T on
+   success."
+  (let ((text (region-text)))
+    (cond
+      ((or (null text) (zerop (length text)))
+       (clear-mark)
+       " Region empty")
+      (t
+       (ring-push text)
+       (delete-region)
+       (setf *last-cmd-was-kill* t)
+       nil))))
+
+(defun copy-region ()
+  "Push the selected text onto *kill-ring* without deleting it.
+   No-op if no region is active or it is empty.  Clears the mark."
+  (let ((text (region-text)))
+    (cond
+      ((or (null text) (zerop (length text)))
+       (clear-mark)
+       " Region empty")
+      (t
+       (ring-push text)
+       (clear-mark)
+       (setf *last-cmd-was-kill* t)
+       nil))))
+
+(defun kill-line ()
+  "Kill from cursor to end of line.  At EOL, kill the trailing newline
+   (joins the next line onto this one).  At the EOL of the last line of
+   the buffer, no-op.  Consecutive kill-line calls append onto the
+   same kill-ring entry instead of pushing a new one."
+  (let* ((ln  (cur-line))
+         (col (buf-col *buf*))
+         (row (buf-row *buf*))
+         (eol (= col (length ln))))
+    (cond
+      ;; mid-line: take the tail
+      ((not eol)
+       (let ((tail (subseq ln col)))
+         (set-cur-line (subseq ln 0 col))
+         (if *last-cmd-was-kill*
+             (setf (first *kill-ring*)
+                   (concatenate 'string (first *kill-ring*) tail))
+             (ring-push tail))
+         (setf (buf-dirty *buf*) t
+               *last-cmd-was-kill* t)
+         nil))
+      ;; EOL but not on last line: kill the newline by joining
+      ((< row (1- (line-count)))
+       (let ((next (nth (1+ row) (buf-lines *buf*))))
+         (set-cur-line (concatenate 'string ln next))
+         (setf (buf-lines *buf*)
+               (append (subseq (buf-lines *buf*) 0 (1+ row))
+                       (subseq (buf-lines *buf*) (+ row 2))))
+         (if *last-cmd-was-kill*
+             (setf (first *kill-ring*)
+                   (concatenate 'string (first *kill-ring*)
+                                (string #\Newline)))
+             (ring-push (string #\Newline)))
+         (setf (buf-dirty *buf*) t
+               *last-cmd-was-kill* t)
+         nil))
+      ;; EOL of last line: nothing to kill
+      (t nil))))
+
+(defun yank ()
+  "Splice (first *kill-ring*) at the cursor.  Multi-line entries split
+   the current line and insert new rows.  Returns a flash string when
+   the kill ring is empty."
+  (cond
+    ((null *kill-ring*) " Kill ring empty")
+    (t
+     (let* ((text  (first *kill-ring*))
+            (parts (let ((acc nil) (start 0))
+                     (dotimes (i (length text))
+                       (when (char= (char text i) #\Newline)
+                         (push (subseq text start i) acc)
+                         (setf start (1+ i))))
+                     (push (subseq text start) acc)
+                     (nreverse acc)))
+            (ln    (cur-line))
+            (col   (buf-col *buf*))
+            (row   (buf-row *buf*))
+            (head  (subseq ln 0 col))
+            (tail  (subseq ln col)))
+       (cond
+         ;; single-line yank: parts has one chunk, no newlines
+         ((= 1 (length parts))
+          (set-cur-line (concatenate 'string head (first parts) tail))
+          (setf (buf-col *buf*) (+ col (length (first parts)))))
+         ;; multi-line yank: head joins first chunk; middle chunks
+         ;; become their own lines; tail joins last chunk
+         (t
+          (let* ((first-part (first parts))
+                 (last-part  (car (last parts)))
+                 (middle     (butlast (rest parts))))
+            (setf (buf-lines *buf*)
+                  (append (subseq (buf-lines *buf*) 0 row)
+                          (list (concatenate 'string head first-part))
+                          middle
+                          (list (concatenate 'string last-part tail))
+                          (subseq (buf-lines *buf*) (1+ row))))
+            (setf (buf-row *buf*) (+ row (1- (length parts)))
+                  (buf-col *buf*) (length last-part)))))
+       (setf (buf-dirty *buf*) t)
+       nil))))
 
 ;;; ---------------------------------------------------------------
 ;;;  6.  Movement
@@ -748,6 +952,29 @@
           (with-color-pair +pair-match+
             (%addstr (string (char line col)))))))))
 
+(defun overlay-selection ()
+  "If a region is active, repaint each visible character inside it with
+   +a-reverse+.  Mirrors overlay-paren-highlight's viewport math."
+  (multiple-value-bind (sr sc er ec) (region-bounds)
+    (when sr
+      (let* ((nrows (rows)) (ncols (cols))
+             (text-rows (- nrows 2))
+             (top (buf-top *buf*)) (left (buf-left *buf*)))
+        (loop for r from sr to er do
+          (let* ((scr-row (- r top)))
+            (when (and (>= scr-row 0) (< scr-row text-rows))
+              (let* ((line  (nth r (buf-lines *buf*)))
+                     (row-start (if (= r sr) sc 0))
+                     (row-end   (if (= r er) ec (length line))))
+                (loop for c from row-start below row-end do
+                  (let ((scr-col (- c left)))
+                    (when (and (>= scr-col 0) (< scr-col ncols)
+                               (< c (length line)))
+                      (%move (1+ scr-row) scr-col)
+                      (%attron +a-reverse+)
+                      (%addstr (string (char line c)))
+                      (%attroff +a-reverse+))))))))))))
+
 ;;; ---------------------------------------------------------------
 ;;;  8.  Rendering
 ;;; ---------------------------------------------------------------
@@ -808,6 +1035,11 @@
      ncols)
     (%attroff +a-reverse+)
 
+    ;; selection overlay — repaint chars in region-bounds with reverse
+    ;; video.  Runs before paren-match so paren highlight wins visually
+    ;; on overlap.
+    (overlay-selection)
+
     ;; paren match overlay — repaint the cursor paren and its partner
     ;; with +pair-match+ so they stand out.  No-op when not on a paren.
     (multiple-value-bind (mr mc) (find-paren-match brow bcol)
@@ -845,11 +1077,35 @@
            (setf input (concatenate 'string input (string (code-char k))))))))))
 
 ;;; ---------------------------------------------------------------
+;;;  9a. Meta-key dispatch
+;;; ---------------------------------------------------------------
+
+(defun read-key ()
+  "Wrap %getch so an Esc (27) followed within ~50 ms by another key is
+   returned as the cons (27 . K2) for Meta-prefix bindings.  A lone Esc
+   returns 27.  Restores blocking mode before returning."
+  (let ((k (%getch)))
+    (cond
+      ((= k 27)
+       (%timeout 50)
+       (let ((k2 (%getch)))
+         (%timeout -1)
+         (if (= k2 -1) 27 (cons 27 k2))))
+      (t k))))
+
+;;; ---------------------------------------------------------------
 ;;;  10. Key dispatch
 ;;; ---------------------------------------------------------------
 
 (defun handle-key (k)
   (cond
+    ;; Meta-prefix: (cons 27 . k2)
+    ((consp k)
+     (cond
+       ((eql (cdr k) (char-code #\w))
+        (copy-region))
+       (t nil)))
+
     ((= k +ctrl-q+)
      (if (buf-dirty *buf*)
          (let ((a (mini-prompt "Unsaved changes — quit? (y/n): ")))
@@ -875,6 +1131,14 @@
                   (mini-prompt "Discard changes? (y/n): ") "y")))
        (when (and a (string-equal a "y"))
          (setf *buf* (make-buf)) " [new buffer]")))
+
+    ;; --- Stage 5 selection / kill / yank ---
+
+    ((= k +ctrl-space+) (set-mark) " Mark set")
+    ((= k +ctrl-w+)     (kill-region))
+    ((= k +ctrl-y+)     (yank))
+    ((= k +ctrl-k+)     (kill-line))
+    ((= k +ctrl-g+)     (clear-mark) " Mark cleared")
 
     ((= k +key-up+)    (move-up)    nil)
     ((= k +key-down+)  (move-down)  nil)
@@ -921,9 +1185,13 @@
         (loop
           (render (when (plusp flash-ttl) flash))
           (when (plusp flash-ttl) (decf flash-ttl))
-          (let* ((k      (%getch))
+          (let* ((k      (read-key))
                  (result (handle-key k)))
-            (setf *last-cmd-was-insert* (and (>= k 32) (< k 127)))
+            (setf *last-cmd-was-insert*
+                  (and (integerp k) (>= k 32) (< k 127)))
+            (setf *last-cmd-was-kill*
+                  (or (and (integerp k) (or (= k +ctrl-k+) (= k +ctrl-w+)))
+                      (and (consp k) (eql (cdr k) (char-code #\w)))))
             (cond
               ((eq result :quit) (return))
               ((stringp result)
