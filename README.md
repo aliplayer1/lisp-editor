@@ -35,6 +35,14 @@ The `--` separator is required: SBCL leaves its own switches in `*posix-argv*`, 
 | Ctrl-O | Open |
 | Ctrl-N | New buffer |
 | Ctrl-Q | Quit (asks if dirty) |
-| Enter | Newline |
+| Enter | Newline (auto-indents inside a form) |
 | Backspace | Delete back |
 | Ctrl-D / Delete | Delete forward |
+| Ctrl-_ | Undo |
+| Ctrl-R | Redo |
+| Ctrl-Space | Set mark (start selection) |
+| Ctrl-W | Cut region to kill ring |
+| M-w (Alt-w or Esc w) | Copy region to kill ring |
+| Ctrl-Y | Yank (paste) |
+| Ctrl-K | Kill to end of line |
+| Ctrl-G | Cancel / clear mark |
