@@ -452,6 +452,7 @@
        (clear-mark)
        " Region empty")
       (t
+       (record-undo)
        (ring-push text)
        (delete-region)
        (setf *last-cmd-was-kill* t)
@@ -483,6 +484,7 @@
     (cond
       ;; mid-line: take the tail
       ((not eol)
+       (record-undo)
        (let ((tail (subseq ln col)))
          (set-cur-line (subseq ln 0 col))
          (if *last-cmd-was-kill*
@@ -494,6 +496,7 @@
          nil))
       ;; EOL but not on last line: kill the newline by joining
       ((< row (1- (line-count)))
+       (record-undo)
        (let ((next (nth (1+ row) (buf-lines *buf*))))
          (set-cur-line (concatenate 'string ln next))
          (setf (buf-lines *buf*)
@@ -517,6 +520,7 @@
   (cond
     ((null *kill-ring*) " Kill ring empty")
     (t
+     (record-undo)
      (let* ((text  (first *kill-ring*))
             (parts (let ((acc nil) (start 0))
                      (dotimes (i (length text))
