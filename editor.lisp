@@ -57,6 +57,7 @@
 (defcfun ("clear"    %clear)    :int)
 (defcfun ("noecho"   %noecho)   :int)
 (defcfun ("cbreak"   %cbreak)   :int)
+(defcfun ("raw"      %raw)      :int)
 (defcfun ("keypad"   %keypad)   :int (win :pointer) (bf :int))
 (defcfun ("move"     %move)     :int (y :int) (x :int))
 (defcfun ("addch"    %addch)    :int (ch :unsigned-int))
@@ -1317,7 +1318,13 @@
     (error "initscr() returned NULL — check that $TERM is set (e.g. xterm-256color)"))
 
   (%noecho)
-  (%cbreak)
+  ;; raw() rather than cbreak(): cbreak() leaves XON/XOFF flow control on,
+  ;; so the tty driver eats Ctrl-S (XOFF) and Ctrl-Q (XON) before getch can
+  ;; see them — Save and Quit never fire.  raw() disables flow control so
+  ;; those keys reach handle-key.  It also stops Ctrl-C/Ctrl-Z/Ctrl-\ from
+  ;; raising signals, which for a full-screen editor is desirable: a stray
+  ;; Ctrl-C can no longer kill the session and drop unsaved work.
+  (%raw)
   (%keypad *stdscr* 1)
   (setup-colors)
 
