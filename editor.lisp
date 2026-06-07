@@ -253,33 +253,68 @@
     (setf (buf-dirty *buf*) t))
   (setf *last-cmd-was-insert* t))
 
+(defun close-paren-first-p (s)
+  "True if the first non-whitespace character of S is a close paren."
+  (let ((trimmed (string-left-trim '(#\Space #\Tab) s)))
+    (and (plusp (length trimmed)) (char= (char trimmed 0) #\)))))
+
 (defun insert-newline ()
   (record-undo)
   (clear-mark)
-  (let* ((ln (cur-line)) (col (buf-col *buf*)) (row (buf-row *buf*)))
-    (set-cur-line (subseq ln 0 col))
-    (setf (buf-lines *buf*)
-          (append (subseq (buf-lines *buf*) 0 (1+ row))
-                  (list (subseq ln col))
-                  (subseq (buf-lines *buf*) (1+ row))))
-    (incf (buf-row *buf*))
-    (setf (buf-col *buf*) 0  (buf-dirty *buf*) t)
-    ;; Auto-indent: if the new line continues a multi-line string or
-    ;; #|...|# block comment, leave it alone (auto-indent would corrupt
-    ;; the literal).  Otherwise, if the cursor is inside a Lisp form,
-    ;; prepend the right number of spaces.
-    (multiple-value-bind (in-str in-blk) (state-at-line (buf-row *buf*))
-      (unless (or in-str (plusp in-blk))
-        (multiple-value-bind (orow ocol)
-            (enclosing-open-paren (buf-row *buf*) 0)
-          (when orow
-            (let ((n (compute-newline-indent orow ocol)))
-              (when (plusp n)
-                (set-cur-line
-                 (concatenate 'string
-                              (make-string n :initial-element #\Space)
-                              (cur-line)))
-                (setf (buf-col *buf*) n)))))))))
+  (let* ((ln   (cur-line))
+         (col  (buf-col *buf*))
+         (row  (buf-row *buf*))
+         (head (subseq ln 0 col))
+         (tail (subseq ln col)))
+    ;; The state carried to the cursor tells us whether we are inside a
+    ;; string or block comment, where neither auto-indent nor the electric
+    ;; close-paren split apply (they would corrupt the literal).
+    (multiple-value-bind (st-str st-blk) (state-at-line row)
+      (multiple-value-bind (toks after-str after-blk)
+          (tokenize-line head st-str st-blk)
+        (declare (ignore toks))
+        (let ((in-literal (or after-str (plusp after-blk))))
+          (cond
+            ;; Electric: a close paren leads the tail and we are in code.
+            ;; Drop the closer onto its own line, dedented to align under
+            ;; its open paren, and leave point on a blank line between,
+            ;; indented the way a normal continuation would be.
+            ((and (not in-literal) (close-paren-first-p tail))
+             (multiple-value-bind (orow ocol) (enclosing-open-paren row col)
+               (let ((mid   (if orow (compute-newline-indent orow ocol) 0))
+                     (close (if orow ocol 0))
+                     (rest  (string-left-trim '(#\Space #\Tab) tail)))
+                 (set-cur-line head)
+                 (setf (buf-lines *buf*)
+                       (append (subseq (buf-lines *buf*) 0 (1+ row))
+                               (list (make-string mid :initial-element #\Space))
+                               (list (concatenate 'string
+                                                  (make-string close :initial-element #\Space)
+                                                  rest))
+                               (subseq (buf-lines *buf*) (1+ row))))
+                 (setf (buf-row *buf*) (1+ row)
+                       (buf-col *buf*) mid
+                       (buf-dirty *buf*) t))))
+            ;; Normal newline.  Auto-indent unless we are inside a literal.
+            (t
+             (set-cur-line head)
+             (setf (buf-lines *buf*)
+                   (append (subseq (buf-lines *buf*) 0 (1+ row))
+                           (list tail)
+                           (subseq (buf-lines *buf*) (1+ row))))
+             (incf (buf-row *buf*))
+             (setf (buf-col *buf*) 0 (buf-dirty *buf*) t)
+             (unless in-literal
+               (multiple-value-bind (orow ocol)
+                   (enclosing-open-paren (buf-row *buf*) 0)
+                 (when orow
+                   (let ((n (compute-newline-indent orow ocol)))
+                     (when (plusp n)
+                       (set-cur-line
+                        (concatenate 'string
+                                     (make-string n :initial-element #\Space)
+                                     (cur-line)))
+                       (setf (buf-col *buf*) n)))))))))))))
 
 (defun delete-backward ()
   (record-undo)
