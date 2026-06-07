@@ -1,6 +1,6 @@
 # Lisp Editor (Common Lisp)
 
-A small terminal text editor . SBCL + CFFI talking directly to ncurses — no `cl-charms`, no ASDF system.
+A small terminal text editor . SBCL + CFFI talking directly to ncurses. No `cl-charms`, no ASDF system.
 
 **Credit: Dr. Marcus Santos (m3santos@torontomu.ca) - Toronto Metropolitan University (Ryerson)**
 
@@ -12,11 +12,11 @@ A small terminal text editor . SBCL + CFFI talking directly to ncurses — no `c
 
 - SBCL
 - Quicklisp (for CFFI)
-- `libncursesw` — `sudo apt install libncurses-dev`
+- `libncursesw`: `sudo apt install libncurses-dev`
 
 ## Running
 
-Must be run in a real terminal (ncurses takes over the tty — not from inside Emacs/SLIME).
+Must be run in a real terminal (ncurses takes over the tty, not from inside Emacs/SLIME).
 
 ```sh
 sbcl --load editor.lisp                  # empty buffer

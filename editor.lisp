@@ -1,4 +1,4 @@
-;;;; editor.lisp — Small terminal text editor.
+;;;; editor.lisp - Small terminal text editor.
 ;;;;              Uses ncurses directly through CFFI.  No cl-charms.
 ;;;;
 ;;;; Requirements:
@@ -808,7 +808,7 @@
                 (push (list seg-start i :comment) tokens))
               (setf after-paren nil))
 
-             ;; #\X character literal — emit a token so its paren/quote isn't matched
+             ;; #\X character literal: emit a token so its paren/quote isn't matched
              ((and (< (+ i 2) n)
                    (char= c #\#)
                    (char= (char line (1+ i)) #\\))
@@ -840,7 +840,7 @@
              ((or (char= c #\Space) (char= c #\Tab))
               (incf i))
 
-             ;; open paren — flag the next symbol as keyword candidate
+             ;; open paren: flag the next symbol as keyword candidate
              ((char= c #\()
               (incf i)
               (setf after-paren t))
@@ -868,7 +868,7 @@
                 (push (list seg-start i :number) tokens))
               (setf after-paren nil))
 
-             ;; symbol — emit as :keyword if it is the operator of a form
+             ;; symbol: emit as :keyword if it is the operator of a form
              ((symbol-char-p c)
               (let ((seg-start i))
                 (loop while (and (< i n) (symbol-char-p (char line i)))
@@ -878,7 +878,7 @@
                   (push (list seg-start i :keyword) tokens)))
               (setf after-paren nil))
 
-             ;; anything else — skip one char
+             ;; anything else: skip one char
              (t
               (incf i)
               (setf after-paren nil)))))))
@@ -908,7 +908,7 @@
     (loop while (< cursor end) do
       (let ((tok (first toks)))
         (cond
-          ;; no more tokens — emit the rest as default-colored
+          ;; no more tokens: emit the rest as default-colored
           ((null tok)
            (%addstr (subseq line cursor end))
            (setf cursor end))
@@ -1132,7 +1132,7 @@
     (when (>= brow (+ (buf-top *buf*) text-rows))
       (setf (buf-top *buf*) (- brow text-rows -1)))
 
-    ;; horizontal scroll — keep the cursor on screen for long lines
+    ;; horizontal scroll: keep the cursor on screen for long lines
     (when (< bcol (buf-left *buf*))
       (setf (buf-left *buf*) bcol))
     (when (>= bcol (+ (buf-left *buf*) ncols))
@@ -1177,12 +1177,12 @@
      ncols)
     (%attroff +a-reverse+)
 
-    ;; selection overlay — repaint chars in region-bounds with reverse
+    ;; selection overlay: repaint chars in region-bounds with reverse
     ;; video.  Runs before paren-match so paren highlight wins visually
     ;; on overlap.
     (overlay-selection)
 
-    ;; paren match overlay — repaint the cursor paren and its partner
+    ;; paren match overlay: repaint the cursor paren and its partner
     ;; with +pair-match+ so they stand out.  No-op when not on a paren.
     (multiple-value-bind (mr mc) (find-paren-match brow bcol)
       (when mr
@@ -1250,7 +1250,7 @@
 
     ((= k +ctrl-q+)
      (if (buf-dirty *buf*)
-         (let ((a (mini-prompt "Unsaved changes — quit? (y/n): ")))
+         (let ((a (mini-prompt "Unsaved changes - quit? (y/n): ")))
            (if (and a (string-equal a "y")) :quit nil))
          :quit))
 
@@ -1262,11 +1262,14 @@
                   (format nil " ERROR: ~a" err))))))
 
     ((= k +ctrl-o+)
-     (let ((p (mini-prompt "Open file: ")))
-       (when p
-         (multiple-value-bind (ok err) (load-file p)
-           (declare (ignore ok))
-           (format nil " ~a~@[ (~a)~]" p err)))))
+     (let ((a (if (buf-dirty *buf*)
+                  (mini-prompt "Discard changes? (y/n): ") "y")))
+       (when (and a (string-equal a "y"))
+         (let ((p (mini-prompt "Open file: ")))
+           (when p
+             (multiple-value-bind (ok err) (load-file p)
+               (declare (ignore ok))
+               (format nil " ~a~@[ (~a)~]" p err)))))))
 
     ((= k +ctrl-n+)
      (let ((a (if (buf-dirty *buf*)
@@ -1315,12 +1318,12 @@
 
   (setf *stdscr* (%initscr))
   (when (null-pointer-p *stdscr*)
-    (error "initscr() returned NULL — check that $TERM is set (e.g. xterm-256color)"))
+    (error "initscr() returned NULL -> Check that $TERM is set (e.g. xterm-256color)"))
 
   (%noecho)
   ;; raw() rather than cbreak(): cbreak() leaves XON/XOFF flow control on,
   ;; so the tty driver eats Ctrl-S (XOFF) and Ctrl-Q (XON) before getch can
-  ;; see them — Save and Quit never fire.  raw() disables flow control so
+  ;; see them - Save and Quit never fire.  raw() disables flow control so
   ;; those keys reach handle-key.  It also stops Ctrl-C/Ctrl-Z/Ctrl-\ from
   ;; raising signals, which for a full-screen editor is desirable: a stray
   ;; Ctrl-C can no longer kill the session and drop unsaved work.
