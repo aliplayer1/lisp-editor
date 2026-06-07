@@ -286,6 +286,15 @@
   (clear-mark)
   (let ((col (buf-col *buf*)) (row (buf-row *buf*)))
     (cond
+      ;; empty auto-pair straddling the cursor: delete both delimiters
+      ((and (> col 0)
+            (let ((ln (cur-line)))
+              (and (< col (length ln))
+                   (eql (pair-closer (char ln (1- col))) (char ln col)))))
+       (let ((ln (cur-line)))
+         (set-cur-line (concatenate 'string
+                                    (subseq ln 0 (1- col)) (subseq ln (1+ col))))
+         (decf (buf-col *buf*))))
       ((> col 0)
        (let ((ln (cur-line)))
          (set-cur-line (concatenate 'string
@@ -507,6 +516,99 @@
                   (buf-col *buf*) (length last-part)))))
        (setf (buf-dirty *buf*) t)
        nil))))
+
+;;; ---------------------------------------------------------------
+;;;  5b. Auto-pair (electric parens and quotes)
+;;; ---------------------------------------------------------------
+
+(defparameter *auto-pairs* '((#\( . #\)) (#\" . #\"))
+  "Opening delimiters that auto-insert their closer.  `'` is deliberately
+   excluded: 'foo is pervasive in Lisp and pairing it would fight the user.")
+
+(defun pair-closer (open)
+  "Closer paired with OPEN, or NIL if OPEN is not an auto-pair opener."
+  (cdr (assoc open *auto-pairs* :test #'char=)))
+
+(defun closer-char-p (ch)
+  "True if CH is the closing delimiter of some auto-pair."
+  (member ch *auto-pairs* :key #'cdr :test #'char=))
+
+(defun in-literal-p (row col)
+  "True if (ROW, COL) sits inside a string, comment, or #\\X char literal
+   per the tokenizer.  Auto-pairing is suppressed there so typed
+   delimiters stay literal."
+  (let ((line (nth row (buf-lines *buf*))))
+    (when line
+      (multiple-value-bind (st-str st-blk) (state-at-line row)
+        (or st-str
+            (plusp st-blk)
+            (paren-skippable-p col (tokenize-line line st-str st-blk)))))))
+
+(defun char-at-cursor ()
+  "Character under the cursor, or NIL at end of line."
+  (let ((ln (cur-line)) (col (buf-col *buf*)))
+    (when (< col (length ln)) (char ln col))))
+
+(defun region-active-p ()
+  "True if a non-empty region is selected."
+  (multiple-value-bind (sr sc er ec) (region-bounds)
+    (and sr (not (and (= sr er) (= sc ec))))))
+
+(defun insert-pair (open close)
+  "Insert OPEN immediately followed by CLOSE, leaving point between them."
+  (let ((ln (cur-line)) (col (buf-col *buf*)))
+    (set-cur-line (concatenate 'string
+                               (subseq ln 0 col)
+                               (string open) (string close)
+                               (subseq ln col)))
+    (incf (buf-col *buf*))
+    (setf (buf-dirty *buf*) t)))
+
+(defun wrap-region (open close)
+  "Surround the active region with OPEN..CLOSE; point lands just past the
+   inserted CLOSE.  Assumes a region is active (read under region-bounds)."
+  (multiple-value-bind (sr sc er ec) (region-bounds)
+    ;; insert CLOSE first so inserting OPEN can't shift its index
+    (let ((eln (nth er (buf-lines *buf*))))
+      (setf (nth er (buf-lines *buf*))
+            (concatenate 'string (subseq eln 0 ec)
+                         (string close) (subseq eln ec))))
+    (let ((sln (nth sr (buf-lines *buf*))))
+      (setf (nth sr (buf-lines *buf*))
+            (concatenate 'string (subseq sln 0 sc)
+                         (string open) (subseq sln sc))))
+    (setf (buf-row *buf*) er
+          ;; on a one-line region the OPEN insertion bumped CLOSE right by 1
+          (buf-col *buf*) (if (= sr er) (+ ec 2) (1+ ec))
+          (buf-dirty *buf*) t)))
+
+(defun self-insert (ch)
+  "Insert CH with electric-pair behavior for the delimiters in
+   *auto-pairs*: step over an existing closer, wrap an active region,
+   auto-insert a matching closer, else insert literally.  Pairing is
+   suppressed inside strings, comments, and char literals."
+  (let ((literal (in-literal-p (buf-row *buf*) (buf-col *buf*)))
+        (region  (region-active-p))
+        (closer  (pair-closer ch)))
+    (cond
+      ;; type a closer right where one already sits -> step over it
+      ((and (closer-char-p ch) (eql (char-at-cursor) ch))
+       (incf (buf-col *buf*)))
+
+      ;; opener with an active region -> wrap the selection
+      ((and closer region (not literal))
+       (record-undo)
+       (wrap-region ch closer)
+       (clear-mark))
+
+      ;; opener in code -> auto-insert the closer, point between
+      ((and closer (not literal))
+       (unless *last-cmd-was-insert* (record-undo))
+       (clear-mark)
+       (insert-pair ch closer))
+
+      ;; everything else (incl. delimiters inside literals) -> plain insert
+      (t (insert-char ch)))))
 
 ;;; ---------------------------------------------------------------
 ;;;  6.  Movement
@@ -1158,7 +1260,7 @@
     ((or (= k +key-dc+) (= k +ctrl-d+))   (delete-forward)  nil)
 
     ((and (>= k 32) (< k 127))
-     (insert-char (code-char k)) nil)
+     (self-insert (code-char k)) nil)
 
     (t nil)))
 
