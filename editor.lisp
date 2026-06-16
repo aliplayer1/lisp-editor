@@ -20,6 +20,7 @@
 ;;;;   Ctrl-S   save          Ctrl-O   open file
 ;;;;   Ctrl-N   new buffer    Ctrl-Q   quit
 ;;;;   Enter    newline       Backspace / Del / Ctrl-D   delete
+;;;;   Tab      reindent line          Meta-G   go to line
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (ql:quickload "cffi" :silent t))
@@ -195,6 +196,12 @@
    insert-char to coalesce a run of single-char inserts into one undo
    step.  Set/cleared by the run loop based on the keycode.")
 
+(defvar *last-cmd-was-delete* nil
+  "T iff the previous handle-key call was a backward/forward delete.  Used
+   by delete-backward and delete-forward to coalesce a run of single-char
+   deletes into one undo step.  Set/cleared by the run loop based on the
+   keycode.")
+
 (defun snapshot ()
   "Capture the current buffer state as a tuple (LINES ROW COL DIRTY).
    Lines is COPY-LIST'd because set-cur-line mutates a cell in place
@@ -318,7 +325,8 @@
                        (setf (buf-col *buf*) n)))))))))))))
 
 (defun delete-backward ()
-  (record-undo)
+  (unless *last-cmd-was-delete*
+    (record-undo))
   (clear-mark)
   (let ((col (buf-col *buf*)) (row (buf-row *buf*)))
     (cond
@@ -348,7 +356,8 @@
     (setf (buf-dirty *buf*) t)))
 
 (defun delete-forward ()
-  (record-undo)
+  (unless *last-cmd-was-delete*
+    (record-undo))
   (clear-mark)
   (let* ((ln (cur-line)) (col (buf-col *buf*)) (row (buf-row *buf*)))
     (cond
@@ -672,6 +681,25 @@
 (defun page-down  (n)
   (setf (buf-row *buf*) (min (1- (line-count)) (+ (buf-row *buf*) n)))
   (clamp-col))
+
+(defun goto-line-number (n)
+  "Move point to 1-based line N, clamped to the buffer's line range.
+   Column is clamped to the destination line's length.  Returns NIL."
+  (setf (buf-row *buf*) (clamp (1- n) 0 (1- (line-count))))
+  (clamp-col)
+  nil)
+
+(defun goto-line ()
+  "Prompt for a 1-based line number on the status bar and jump to it.
+   Returns NIL on success or an empty entry, or a flash string when the
+   entry is not a positive integer."
+  (let ((s (mini-prompt "Go to line: ")))
+    (cond
+      ((or (null s) (zerop (length s))) nil)
+      (t (let ((n (parse-integer s :junk-allowed t)))
+           (if (and n (plusp n))
+               (goto-line-number n)
+               " Bad line number"))))))
 
 ;;; ---------------------------------------------------------------
 ;;;  7.  Syntax highlighting & paren matching
@@ -1071,6 +1099,38 @@
                     do (incf i))
               (if (< i n) i (1+ open-col))))))))))
 
+(defun reindent-line ()
+  "Re-indent the current line to match its Lisp nesting, the same way Enter
+   auto-indents a fresh line: the leading whitespace is replaced with the
+   computed indent.  A line whose first non-whitespace character is a close
+   paren dedents to align under its enclosing opener.  No-op (and no undo
+   step) when the line is already correctly indented or sits inside a string
+   or block comment.  Point keeps its place in the line's text.  Returns NIL."
+  (let* ((row     (buf-row *buf*))
+         (line    (cur-line))
+         (trimmed (string-left-trim '(#\Space #\Tab) line))
+         (old     (- (length line) (length trimmed))))
+    (multiple-value-bind (st-str st-blk) (state-at-line row)
+      (unless (or st-str (plusp st-blk))
+        (multiple-value-bind (orow ocol) (enclosing-open-paren row 0)
+          (let ((target
+                  (cond
+                    ((null orow) 0)
+                    ((and (plusp (length trimmed))
+                          (char= (char trimmed 0) #\))) ocol)
+                    (t (compute-newline-indent orow ocol)))))
+            (unless (= target old)
+              (record-undo)
+              (set-cur-line
+               (concatenate 'string
+                            (make-string target :initial-element #\Space)
+                            trimmed))
+              (setf (buf-col *buf*)
+                    (clamp (max target (+ (buf-col *buf*) (- target old)))
+                           0 (length (cur-line)))
+                    (buf-dirty *buf*) t)))))))
+  nil)
+
 (defun find-paren-match (row col)
   "Return (values match-row match-col) for the paren at (ROW, COL),
    or NIL if there is no match (no paren, in string/comment, unbalanced)."
@@ -1246,6 +1306,8 @@
      (cond
        ((eql (cdr k) (char-code #\w))
         (copy-region))
+       ((eql (cdr k) (char-code #\g))
+        (goto-line))
        (t nil)))
 
     ((= k +ctrl-q+)
@@ -1297,6 +1359,8 @@
     ((= k +ctrl-underscore+) (do-undo))
     ((= k +ctrl-r+)          (do-redo))
 
+    ((= k 9) (reindent-line))
+
     ((or (= k 10) (= k 13))               (insert-newline)   nil)
     ((or (= k 127) (= k 8)
          (= k +key-backspace+))            (delete-backward) nil)
@@ -1343,6 +1407,10 @@
             (setf *last-cmd-was-kill*
                   (or (and (integerp k) (or (= k +ctrl-k+) (= k +ctrl-w+)))
                       (and (consp k) (eql (cdr k) (char-code #\w)))))
+            (setf *last-cmd-was-delete*
+                  (and (integerp k)
+                       (or (= k 127) (= k 8) (= k +key-backspace+)
+                           (= k +key-dc+) (= k +ctrl-d+))))
             (cond
               ((eq result :quit) (return))
               ((stringp result)
