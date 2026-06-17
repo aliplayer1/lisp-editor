@@ -21,6 +21,7 @@
 ;;;;   Ctrl-N   new buffer    Ctrl-Q   quit
 ;;;;   Enter    newline       Backspace / Del / Ctrl-D   delete
 ;;;;   Tab      reindent line          Meta-G   go to line
+;;;;   Meta-F / Meta-B   word fwd / back     Meta-D / Meta-Bksp   kill word
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (ql:quickload "cffi" :silent t))
@@ -701,6 +702,89 @@
                (goto-line-number n)
                " Bad line number"))))))
 
+;;; ----- Word-wise motion and deletion -----------------------------
+;;; A "word" is a maximal run of symbol-char-p characters, so Lisp
+;;; identifiers like foo-bar and list->vector move and delete as one
+;;; unit.  Motion crosses line boundaries, treating the line break as a
+;;; word separator, the way Emacs M-f / M-b do.
+
+(defun move-word-forward ()
+  "Move point to the end of the next word."
+  (let ((nlines (line-count)))
+    ;; skip non-word characters (and line breaks) up to the next word
+    (loop
+      (let ((line (cur-line)) (col (buf-col *buf*)))
+        (cond
+          ((>= col (length line))
+           (if (< (buf-row *buf*) (1- nlines))
+               (setf (buf-row *buf*) (1+ (buf-row *buf*)) (buf-col *buf*) 0)
+               (return-from move-word-forward)))
+          ((symbol-char-p (char line col)) (return))
+          (t (incf (buf-col *buf*))))))
+    ;; consume the word itself (never crosses the line break)
+    (loop
+      (let ((line (cur-line)) (col (buf-col *buf*)))
+        (if (and (< col (length line)) (symbol-char-p (char line col)))
+            (incf (buf-col *buf*))
+            (return))))))
+
+(defun move-word-backward ()
+  "Move point to the start of the previous word."
+  ;; skip non-word characters (and line breaks) back to the prior word
+  (loop
+    (let ((col (buf-col *buf*)))
+      (cond
+        ((<= col 0)
+         (if (> (buf-row *buf*) 0)
+             (progn
+               (decf (buf-row *buf*))
+               (setf (buf-col *buf*) (length (cur-line))))
+             (return-from move-word-backward)))
+        ((symbol-char-p (char (cur-line) (1- col))) (return))
+        (t (decf (buf-col *buf*))))))
+  ;; consume the word itself (never crosses the line break)
+  (loop
+    (let ((col (buf-col *buf*)))
+      (if (and (> col 0) (symbol-char-p (char (cur-line) (1- col))))
+          (decf (buf-col *buf*))
+          (return)))))
+
+(defun kill-word-forward ()
+  "Kill from point to the end of the next word, appending to the current
+   kill-ring entry on consecutive kills.  No-op at end of buffer.  Returns
+   NIL."
+  (let ((sr (buf-row *buf*)) (sc (buf-col *buf*)))
+    (move-word-forward)
+    (when (or (/= sr (buf-row *buf*)) (/= sc (buf-col *buf*)))
+      (setf (buf-mark-row *buf*) sr (buf-mark-col *buf*) sc)
+      (let ((text (region-text)))
+        (record-undo)
+        (if *last-cmd-was-kill*
+            (setf (first *kill-ring*)
+                  (concatenate 'string (first *kill-ring*) text))
+            (ring-push text))
+        (delete-region)
+        (setf *last-cmd-was-kill* t))))
+  nil)
+
+(defun kill-word-backward ()
+  "Kill from the start of the previous word to point, prepending to the
+   current kill-ring entry on consecutive kills.  No-op at start of buffer.
+   Returns NIL."
+  (let ((er (buf-row *buf*)) (ec (buf-col *buf*)))
+    (move-word-backward)
+    (when (or (/= er (buf-row *buf*)) (/= ec (buf-col *buf*)))
+      (setf (buf-mark-row *buf*) er (buf-mark-col *buf*) ec)
+      (let ((text (region-text)))
+        (record-undo)
+        (if *last-cmd-was-kill*
+            (setf (first *kill-ring*)
+                  (concatenate 'string text (first *kill-ring*)))
+            (ring-push text))
+        (delete-region)
+        (setf *last-cmd-was-kill* t))))
+  nil)
+
 ;;; ---------------------------------------------------------------
 ;;;  7.  Syntax highlighting & paren matching
 ;;; ---------------------------------------------------------------
@@ -1308,6 +1392,15 @@
         (copy-region))
        ((eql (cdr k) (char-code #\g))
         (goto-line))
+       ((eql (cdr k) (char-code #\f))
+        (move-word-forward) nil)
+       ((eql (cdr k) (char-code #\b))
+        (move-word-backward) nil)
+       ((eql (cdr k) (char-code #\d))
+        (kill-word-forward))
+       ((or (eql (cdr k) 127) (eql (cdr k) 8)
+            (eql (cdr k) +key-backspace+))
+        (kill-word-backward))
        (t nil)))
 
     ((= k +ctrl-q+)
@@ -1406,7 +1499,12 @@
                   (and (integerp k) (>= k 32) (< k 127)))
             (setf *last-cmd-was-kill*
                   (or (and (integerp k) (or (= k +ctrl-k+) (= k +ctrl-w+)))
-                      (and (consp k) (eql (cdr k) (char-code #\w)))))
+                      (and (consp k)
+                           (let ((c (cdr k)))
+                             (or (eql c (char-code #\w))
+                                 (eql c (char-code #\d))
+                                 (eql c 127) (eql c 8)
+                                 (eql c +key-backspace+))))))
             (setf *last-cmd-was-delete*
                   (and (integerp k)
                        (or (= k 127) (= k 8) (= k +key-backspace+)
