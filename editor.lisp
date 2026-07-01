@@ -157,6 +157,45 @@
   (setf (buf-col *buf*) (clamp (buf-col *buf*) 0 (length (cur-line)))))
 
 ;;; ---------------------------------------------------------------
+;;;  3a. Language profiles
+;;; ---------------------------------------------------------------
+
+(defstruct lang
+  name           ; keyword shown in the status bar: :lisp :c :python
+  pairs          ; alist of (opener . closer) chars that auto-pair
+  newline-style  ; :lisp-form | :c-brace | :python-indent
+  indent-width   ; step used by :c-brace / :python-indent
+  extensions)    ; lowercase extension strings, no leading dot
+
+(defparameter *lisp-lang*
+  ;; ' is intentionally excluded: 'foo quoting is pervasive in Lisp.
+  (make-lang :name :lisp
+             :pairs '((#\( . #\)) (#\" . #\") (#\[ . #\]))
+             :newline-style :lisp-form
+             :indent-width 2
+             :extensions '("lisp" "cl" "lsp" "el" "scm" "clj" "cljs" "ss" "rkt")))
+
+(defparameter *c-lang*
+  (make-lang :name :c
+             :pairs '((#\( . #\)) (#\{ . #\}) (#\[ . #\])
+                      (#\" . #\") (#\' . #\'))
+             :newline-style :c-brace
+             :indent-width 4
+             :extensions '("c" "h" "cpp" "cc" "hpp" "hh" "cxx"
+                           "js" "ts" "jsx" "tsx" "java" "cs" "go" "rs")))
+
+(defparameter *python-lang*
+  (make-lang :name :python
+             :pairs '((#\( . #\)) (#\[ . #\]) (#\{ . #\})
+                      (#\" . #\") (#\' . #\'))
+             :newline-style :python-indent
+             :indent-width 4
+             :extensions '("py" "pyw" "pyi")))
+
+(defparameter *languages* (list *lisp-lang* *c-lang* *python-lang*))
+(defparameter *default-lang* *lisp-lang*)
+
+;;; ---------------------------------------------------------------
 ;;;  4.  File I/O
 ;;; ---------------------------------------------------------------
 
