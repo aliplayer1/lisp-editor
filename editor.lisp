@@ -73,6 +73,11 @@
 (defcfun ("attron"   %attron)   :int (a :unsigned-long))
 (defcfun ("attroff"  %attroff)  :int (a :unsigned-long))
 
+;; terminfo lookups (live in libtinfo, resolved at runtime): used to discover
+;; the shifted-movement keycodes without hardcoding them.
+(defcfun ("tigetstr"    %tigetstr)    :pointer (capname :string))
+(defcfun ("key_defined" %key-defined) :int     (definition :string))
+
 ;;; color (extension symbols are looked up lazily; calls are guarded)
 (defcfun ("start_color"        %start-color)        :int)
 (defcfun ("init_pair"          %init-pair)          :int (pair :short) (fg :short) (bg :short))
@@ -145,7 +150,8 @@
   (undo     nil       :type list)
   (redo     nil       :type list)
   (mark-row nil)
-  (mark-col nil))
+  (mark-col nil)
+  (mark-shift nil))
 
 (defvar *buf* (make-buf))
 
@@ -394,14 +400,21 @@
 ;;; ---------------------------------------------------------------
 
 (defun set-mark ()
-  "Anchor the selection at the current cursor."
+  "Anchor the selection at the current cursor.  Clears the shift-origin flag,
+   so a Ctrl-Space selection is Emacs-style (plain movement extends it)."
   (setf (buf-mark-row *buf*) (buf-row *buf*)
-        (buf-mark-col *buf*) (buf-col *buf*)))
+        (buf-mark-col *buf*) (buf-col *buf*)
+        (buf-mark-shift *buf*) nil))
+
+(defun ensure-mark ()
+  "Set the mark at point only if no selection is currently active."
+  (unless (buf-mark-row *buf*) (set-mark)))
 
 (defun clear-mark ()
   "Discard any active selection."
   (setf (buf-mark-row *buf*) nil
-        (buf-mark-col *buf*) nil))
+        (buf-mark-col *buf*) nil
+        (buf-mark-shift *buf*) nil))
 
 (defun region-bounds ()
   "Return (values start-row start-col end-row end-col) with start <= end,
@@ -801,6 +814,59 @@
         (delete-region)
         (setf *last-cmd-was-kill* t))))
   nil)
+
+;;; ----- Shift-select: extend the region with Shift + movement --------
+;;; The shifted movement keycodes are discovered at startup from terminfo
+;;; (tigetstr + key_defined), so nothing is hardcoded and a terminal that
+;;; lacks a capability simply leaves that key unbound.
+
+(defun shift-move (mover)
+  "Extend a Shift-selection: anchor the mark at point if none is set (tagging
+   the selection as shift-started), then run MOVER so the region drags with the
+   cursor.  Returns NIL."
+  (let ((had-mark (buf-mark-row *buf*)))
+    (ensure-mark)
+    (unless had-mark (setf (buf-mark-shift *buf*) t)))
+  (funcall mover)
+  nil)
+
+(defun plain-move (mover)
+  "Run an unshifted movement.  A Shift-started selection ends first (plain
+   movement collapses it); a Ctrl-Space selection is left intact so it keeps
+   extending Emacs-style.  Returns NIL."
+  (when (buf-mark-shift *buf*) (clear-mark))
+  (funcall mover)
+  nil)
+
+(defvar *shift-keys* nil
+  "Alist of (keycode . mover) for the shifted movement keys, built by
+   setup-shift-keys at startup.  Empty until then (e.g. under tests).")
+
+(defun terminfo-key-code (capname)
+  "The keycode ncurses assigns to terminfo string capability CAPNAME on this
+   terminal, or NIL if the capability is absent or unbound.  Must run after
+   keypad is enabled.  All CAPNAMEs used here are string capabilities, so
+   tigetstr returns a null pointer (not the (char *)-1 sentinel) when absent."
+  (let ((seq (%tigetstr capname)))
+    (unless (null-pointer-p seq)
+      (let ((code (%key-defined (foreign-string-to-lisp seq))))
+        (when (> code 0) code)))))
+
+(defun setup-shift-keys ()
+  "Discover the shifted movement keycodes and build *shift-keys*.  A key whose
+   capability is missing on this terminal is simply left unbound."
+  (setf *shift-keys*
+        (loop for (cap . mover) in
+              (list (cons "kLFT" #'move-left)
+                    (cons "kRIT" #'move-right)
+                    (cons "kri"  #'move-up)
+                    (cons "kind" #'move-down)
+                    (cons "kHOM" #'move-home)
+                    (cons "kEND" #'move-end)
+                    (cons "kPRV" (lambda () (page-up   (- (rows) 3))))
+                    (cons "kNXT" (lambda () (page-down (- (rows) 3)))))
+              for code = (terminfo-key-code cap)
+              when code collect (cons code mover))))
 
 ;;; ---------------------------------------------------------------
 ;;;  7.  Syntax highlighting & paren matching
@@ -1457,14 +1523,18 @@
     ((= k +ctrl-k+)     (kill-line))
     ((= k +ctrl-g+)     (clear-mark) " Mark cleared")
 
-    ((= k +key-up+)    (move-up)    nil)
-    ((= k +key-down+)  (move-down)  nil)
-    ((= k +key-left+)  (move-left)  nil)
-    ((= k +key-right+) (move-right) nil)
-    ((or (= k +key-home+) (= k +ctrl-a+))  (move-home) nil)
-    ((or (= k +key-end+)  (= k +ctrl-e+))  (move-end)  nil)
-    ((= k +key-ppage+) (page-up   (- (rows) 3)) nil)
-    ((= k +key-npage+) (page-down (- (rows) 3)) nil)
+    ((= k +key-up+)    (plain-move #'move-up))
+    ((= k +key-down+)  (plain-move #'move-down))
+    ((= k +key-left+)  (plain-move #'move-left))
+    ((= k +key-right+) (plain-move #'move-right))
+    ((or (= k +key-home+) (= k +ctrl-a+))  (plain-move #'move-home))
+    ((or (= k +key-end+)  (= k +ctrl-e+))  (plain-move #'move-end))
+    ((= k +key-ppage+) (plain-move (lambda () (page-up   (- (rows) 3)))))
+    ((= k +key-npage+) (plain-move (lambda () (page-down (- (rows) 3)))))
+
+    ;; Shift + movement extends the selection (keycodes discovered at startup)
+    ((and (integerp k) (assoc k *shift-keys*))
+     (shift-move (cdr (assoc k *shift-keys*))))
 
     ((= k +ctrl-underscore+) (do-undo))
     ((= k +ctrl-r+)          (do-redo))
@@ -1503,6 +1573,7 @@
   ;; Ctrl-C can no longer kill the session and drop unsaved work.
   (%raw)
   (%keypad *stdscr* 1)
+  (setup-shift-keys)
   (setup-colors)
 
   (let ((flash nil) (flash-ttl 0))
