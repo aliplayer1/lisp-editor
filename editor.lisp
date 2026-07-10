@@ -160,7 +160,8 @@
   (redo     nil       :type list)
   (mark-row nil)
   (mark-col nil)
-  (mark-shift nil))
+  (mark-shift nil)
+  (lang      nil))
 
 (defvar *buf* (make-buf))
 
@@ -210,6 +211,26 @@
 (defparameter *languages* (list *lisp-lang* *c-lang* *python-lang*))
 (defparameter *default-lang* *lisp-lang*)
 
+(defun current-lang ()
+  "Language profile of the current buffer, defaulting to *default-lang*."
+  (or (buf-lang *buf*) *default-lang*))
+
+(defun file-extension (path)
+  "Lowercased extension of PATH without the dot, or NIL if there is none."
+  (let* ((name (file-namestring path))
+         (dot  (position #\. name :from-end t)))
+    (when (and dot (< (1+ dot) (length name)))
+      (string-downcase (subseq name (1+ dot))))))
+
+(defun detect-language (path)
+  "Language profile whose extensions include PATH's extension, else default."
+  (let ((ext (file-extension path)))
+    (or (and ext
+             (find-if (lambda (l)
+                        (member ext (lang-extensions l) :test #'string=))
+                      *languages*))
+        *default-lang*)))
+
 ;;; ---------------------------------------------------------------
 ;;;  4.  File I/O
 ;;; ---------------------------------------------------------------
@@ -224,6 +245,7 @@
                 (buf-top      *buf*) 0
                 (buf-left     *buf*) 0
                 (buf-filename *buf*) path
+                (buf-lang     *buf*) (detect-language path)
                 (buf-dirty    *buf*) nil))
         (values t nil))
     (error (e) (values nil (format nil "~a" e)))))
