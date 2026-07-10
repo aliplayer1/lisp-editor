@@ -1621,4 +1621,8 @@
          (file (when sep (nth (1+ sep) argv))))
     (run file)))
 
-(unless *suppress-main* (main))
+(unless *suppress-main*
+  (main)
+  ;; Leave the process once the editor quits: without this, `sbcl --load
+  ;; editor.lisp` drops into the bare SBCL REPL prompt after (main) returns.
+  #+sbcl (sb-ext:exit))
