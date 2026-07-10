@@ -31,6 +31,15 @@
 
 (in-package #:ted)
 
+;; Forward declarations: these are referenced before their defuns appear
+;; (the file is grouped by topic, not definition order), so declare them
+;; up front to keep SBCL from emitting undefined-function STYLE-WARNINGs
+;; at load time.
+(declaim (ftype function
+                clear-mark pair-closer symbol-char-p mini-prompt
+                tokenize-line state-at-line paren-skippable-p
+                enclosing-open-paren compute-newline-indent))
+
 ;;; ---------------------------------------------------------------
 ;;;  1.  Load libncurses
 ;;; ---------------------------------------------------------------
