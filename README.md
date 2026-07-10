@@ -1,6 +1,6 @@
 # Lisp Editor (Common Lisp)
 
-A small terminal text editor . SBCL + CFFI talking directly to ncurses. No `cl-charms`, no ASDF system.
+A small terminal text editor. SBCL + CFFI talking directly to ncurses. No `cl-charms`, no ASDF system.
 
 **Credit: Dr. Marcus Santos (m3santos@torontomu.ca) - Toronto Metropolitan University (Ryerson)**
 
@@ -12,7 +12,7 @@ A small terminal text editor . SBCL + CFFI talking directly to ncurses. No `cl-c
 
 - SBCL
 - Quicklisp (for CFFI)
-- `libncursesw`: `sudo apt install libncurses-dev`
+- `libncursesw`: `sudo apt install libncurses-dev` (Debian/Ubuntu) or `sudo dnf install ncurses-devel` (Fedora)
 
 ## Running
 
@@ -25,19 +25,26 @@ sbcl --load editor.lisp -- myfile.txt    # open a file
 
 The `--` separator is required: SBCL leaves its own switches in `*posix-argv*`, so it's the only reliable boundary between SBCL flags and your filename.
 
+Quitting the editor exits SBCL and returns you straight to the shell.
+
 ## Keys
 
 | Key | Action |
 |---|---|
 | Arrows / Home / End / PgUp / PgDn | Navigation |
+| Shift + any movement key | Select while moving (see Selection below) |
 | Ctrl-A / Ctrl-E | Line start / end |
+| M-f / M-b | Forward / backward one word |
+| M-g | Go to line (prompts for a line number) |
 | Ctrl-S | Save |
 | Ctrl-O | Open |
 | Ctrl-N | New buffer |
 | Ctrl-Q | Quit (asks if dirty) |
 | Enter | Newline (auto-indents inside a form) |
+| Tab | Reindent the current line |
 | Backspace | Delete back |
 | Ctrl-D / Delete | Delete forward |
+| M-d / M-Backspace | Kill next / previous word |
 | Ctrl-_ | Undo |
 | Ctrl-R | Redo |
 | Ctrl-Space | Set mark (start selection) |
@@ -46,3 +53,35 @@ The `--` separator is required: SBCL leaves its own switches in `*posix-argv*`, 
 | Ctrl-Y | Yank (paste) |
 | Ctrl-K | Kill to end of line |
 | Ctrl-G | Cancel / clear mark |
+
+M- is the Meta key: Alt, or Esc followed by the key.
+
+## Selection
+
+Two ways to select a region:
+
+- **Shift + movement** (arrows, Home/End, PgUp/PgDn) starts a selection and
+  drags it as long as you keep Shift held. Releasing Shift and moving
+  normally collapses it.
+- **Ctrl-Space** sets an Emacs-style mark: any movement extends the region
+  until you clear it (Ctrl-G) or act on it (Ctrl-W / M-w).
+
+Either way, the highlighted region works with cut (Ctrl-W), copy (M-w), and
+yank (Ctrl-Y). Shifted keys are discovered from the terminal's terminfo at
+startup, so they work across terminals that advertise them.
+
+## Editing niceties
+
+- Typing `(` or `"` auto-inserts the matching closer with the cursor in
+  between; typing the closer skips over it, backspacing inside an empty pair
+  deletes both halves, and typing an opener with a region selected wraps the
+  region. All suppressed inside strings, comments, and character literals.
+- Enter auto-indents the new line based on the enclosing form; pressing
+  Enter just before a closing paren moves the closer to its own line,
+  re-indented.
+- A word is a run of Lisp symbol characters, so `foo-bar` moves and kills as
+  one unit. Consecutive word kills coalesce into a single kill-ring entry,
+  and runs of inserts or deletes each coalesce into a single undo step.
+- Buffers detect their language from the file extension (Lisp, C-style,
+  Python profiles; Lisp is the default). Language-aware bracket and indent
+  behavior is being wired in incrementally.
