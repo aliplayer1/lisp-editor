@@ -38,7 +38,8 @@
 (declaim (ftype function
                 clear-mark pair-closer symbol-char-p mini-prompt
                 tokenize-line state-at-line paren-skippable-p
-                enclosing-open-paren compute-newline-indent))
+                enclosing-open-paren compute-newline-indent
+                sexp-bounds-at))
 
 ;;; ---------------------------------------------------------------
 ;;;  1.  Load libncurses
@@ -377,7 +378,7 @@
                                   (make-string n :initial-element #\Space)
                                   (cur-line)))
                     (setf (buf-col *buf*) n)))))))))))
-    		 
+
 
 (defun delete-backward ()
   (unless *last-cmd-was-delete*
@@ -1240,6 +1241,79 @@
                  (values (first p) (second p)))))))))
     nil))
 
+(defun sexp-bounds-at (row col)
+    "Bounds of the first s-expression starting at or after (ROW, COL):
+     (values sr sc er ec), EC inclusive.  Whitespace and comments are
+     skipped.  Returns NIL at a close paren (end of the enclosing form)
+     or when only whitespace/comments remain to end of buffer."
+    (let ((nlines (line-count)))
+      (loop while (< row nlines) do
+        (let* ((line (nth row (buf-lines *buf*)))
+               (n    (length line)))
+          (multiple-value-bind (st-str st-blk) (state-at-line row)
+            (multiple-value-bind (toks line-end-str)
+                (tokenize-line line st-str st-blk)
+              (loop while (< col n) do
+                (let ((c   (char line col))
+                      (tok (find-if (lambda (tk) (and (<= (first tk) col)
+                                                      (< col (second tk))))
+                                    toks)))
+                  (cond
+                    ;; comments skip like whitespace
+                    ((and tok (eq (third tok) :comment))
+                     (setf col (second tok)))
+                    ((or (char= c #\Space) (char= c #\Tab))
+                     (incf col))
+                    ;; a string or char literal is one sexp: its token extent.
+                    ;; A string still open at end of line (it is then the
+                    ;; line's last token) continues on later lines; walk to
+                    ;; the line where it closes.
+                    ((and tok (member (third tok) '(:string :char)))
+                     (if (and (eq (third tok) :string)
+                              (= (second tok) n)
+                              line-end-str)
+                         (let ((r (1+ row)) (in-str t) (in-blk 0))
+                           (loop while (< r nlines) do
+                             (multiple-value-bind (tks2 s2 b2)
+                                 (tokenize-line (nth r (buf-lines *buf*))
+                                                in-str in-blk)
+                               (unless s2
+                                 (return-from sexp-bounds-at
+                                   (values row (first tok)
+                                           r (1- (second (first tks2))))))
+                               (setf in-str s2 in-blk b2))
+                             (incf r))
+                           (return-from sexp-bounds-at nil))
+                         (return-from sexp-bounds-at
+                           (values row (first tok) row (1- (second tok))))))
+                    ((char= c #\))
+                     (return-from sexp-bounds-at nil))
+                    ((char= c #\()
+                     (multiple-value-bind (mr mc) (walk-paren-forward row col)
+                       (return-from sexp-bounds-at
+                         (when mr (values row col mr mc)))))
+                    ;; reader-macro prefixes attach to the sexp that follows
+                    ((find c "'`,@#")
+                     (let ((start col))
+                       (incf col)
+                       (loop while (and (< col n) (find (char line col) "'`,@#"))
+                             do (incf col))
+                       (multiple-value-bind (sr sc er ec) (sexp-bounds-at row col)
+                         (declare (ignore sc))
+                         (return-from sexp-bounds-at
+                           (when (and sr (= sr row))
+                             (values row start er ec))))))
+                    ((symbol-char-p c)
+                     (let ((start col))
+                       (loop while (and (< col n) (symbol-char-p (char line col)))
+                             do (incf col))
+                       (return-from sexp-bounds-at
+                         (values row start row (1- col)))))
+                    (t (return-from sexp-bounds-at (values row col row col)))))))))
+        (incf row)
+        (setf col 0))
+      nil))
+
 (defun enclosing-open-paren (row col)
   "Return (values OPEN-ROW OPEN-COL) of the innermost unclosed `(`
    containing position (ROW, COL), or NIL if none.  Parens inside
@@ -1264,6 +1338,97 @@
     (when stack
       (let ((top (first stack)))
         (values (first top) (second top))))))
+
+(defun last-two-sexps-before (row col)
+  "The last two s-expressions ENDING strictly before (ROW, COL) inside
+   the innermost form enclosing that position.  Returns (values LAST
+   PREV), each a list (sr sc er ec) with inclusive EC, or NIL.  Both
+   NIL when there is no enclosing form or it is empty."
+  (multiple-value-bind (orow ocol) (enclosing-open-paren row col)
+    (if (null orow)
+        (values nil nil)
+        (let ((r orow) (c (1+ ocol)) (last nil) (prev nil))
+          (loop
+            (multiple-value-bind (sr sc er ec) (sexp-bounds-at r c)
+              (unless sr (return))
+              ;; stop once a sexp ends at or past the target position
+              (unless (or (< er row) (and (= er row) (< ec col)))
+                (return))
+              (setf prev last
+                    last (list sr sc er ec)
+                    r er
+                    c (1+ ec))))
+          (values last prev)))))
+
+(defun splice-paren (from-row from-col to-row to-col)
+  "Delete the close paren at (FROM-ROW, FROM-COL) and re-insert it at
+   (TO-ROW, TO-COL).  TO-COL is interpreted in the line's coordinates
+   BEFORE the deletion; same-line moves adjust for the removed char.
+   Marks the buffer dirty.  Caller records undo."
+  (if (= from-row to-row)
+      (let* ((ln  (nth from-row (buf-lines *buf*)))
+             (del (concatenate 'string (subseq ln 0 from-col)
+                               (subseq ln (1+ from-col))))
+             (ins (if (> to-col from-col) (1- to-col) to-col)))
+        (setf (nth from-row (buf-lines *buf*))
+              (concatenate 'string (subseq del 0 ins) ")" (subseq del ins))))
+      (progn
+        (let ((ln (nth from-row (buf-lines *buf*))))
+          (setf (nth from-row (buf-lines *buf*))
+                (concatenate 'string (subseq ln 0 from-col)
+                             (subseq ln (1+ from-col)))))
+        (let ((ln (nth to-row (buf-lines *buf*))))
+          (setf (nth to-row (buf-lines *buf*))
+                (concatenate 'string (subseq ln 0 to-col) ")"
+                             (subseq ln to-col))))))
+  (setf (buf-dirty *buf*) t))
+
+(defun slurp-forward ()
+  "Pull the s-expression after the enclosing form inside its closer:
+   (a)| b  ->  (a b).  Returns a flash string on refusal, NIL on success."
+  (if (in-literal-p (buf-row *buf*) (buf-col *buf*))
+      " In a string or comment"
+      (multiple-value-bind (orow ocol)
+          (enclosing-open-paren (buf-row *buf*) (buf-col *buf*))
+        (if (null orow)
+            " No enclosing form"
+            (multiple-value-bind (crow ccol) (walk-paren-forward orow ocol)
+              (if (null crow)
+                  " Unbalanced form"
+                  (multiple-value-bind (sr sc er ec)
+                      (sexp-bounds-at crow (1+ ccol))
+                    (declare (ignore sc))
+                    (if (null sr)
+                        " Nothing to slurp"
+                        (progn
+                          (record-undo)
+                          (splice-paren crow ccol er (1+ ec))
+                          (clamp-col)
+                          nil)))))))))
+
+(defun barf-forward ()
+  "Eject the enclosing form's last s-expression past its closer:
+   (a b|)  ->  (a) b.  Refuses rather than empty the form.  Returns a
+   flash string on refusal, NIL on success."
+  (if (in-literal-p (buf-row *buf*) (buf-col *buf*))
+      " In a string or comment"
+      (multiple-value-bind (orow ocol)
+          (enclosing-open-paren (buf-row *buf*) (buf-col *buf*))
+        (if (null orow)
+            " No enclosing form"
+            (multiple-value-bind (crow ccol) (walk-paren-forward orow ocol)
+              (if (null crow)
+                  " Unbalanced form"
+                  (multiple-value-bind (last prev)
+                      (last-two-sexps-before crow ccol)
+                    (declare (ignore last))
+                    (if (null prev)
+                        " Nothing to barf"
+                        (progn
+                          (record-undo)
+                          (splice-paren crow ccol (third prev) (1+ (fourth prev)))
+                          (clamp-col)
+                          nil)))))))))
 
 (defun compute-newline-indent (open-row open-col)
   "Given the enclosing open-paren position, return the column the new
@@ -1512,6 +1677,10 @@
         (move-word-backward) nil)
        ((eql (cdr k) (char-code #\d))
         (kill-word-forward))
+       ((eql (cdr k) (char-code #\)))
+        (slurp-forward))
+       ((eql (cdr k) (char-code #\}))
+        (barf-forward))
        ((or (eql (cdr k) 127) (eql (cdr k) 8)
             (eql (cdr k) +key-backspace+))
         (kill-word-backward))
