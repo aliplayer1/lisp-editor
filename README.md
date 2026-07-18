@@ -53,6 +53,8 @@ Quitting the editor exits SBCL and returns you straight to the shell.
 | Ctrl-Y | Yank (paste) |
 | Ctrl-K | Kill to end of line |
 | Ctrl-G | Cancel / clear mark |
+| M-) | Slurp: pull the next s-expression into the enclosing form |
+| M-} | Barf: eject the form's last s-expression past the closer |
 
 M- is the Meta key: Alt, or Esc followed by the key.
 
@@ -79,6 +81,9 @@ startup, so they work across terminals that advertise them.
 - Enter auto-indents the new line based on the enclosing form; pressing
   Enter just before a closing paren moves the closer to its own line,
   re-indented.
+- Paredit-style structural editing: M-) slurps the next s-expression into
+  the form enclosing the cursor, M-} barfs the form's last one back out.
+  Both refuse inside strings and comments and undo in a single step.
 - A word is a run of Lisp symbol characters, so `foo-bar` moves and kills as
   one unit. Consecutive word kills coalesce into a single kill-ring entry,
   and runs of inserts or deletes each coalesce into a single undo step.
