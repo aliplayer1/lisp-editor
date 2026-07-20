@@ -25,6 +25,8 @@ sbcl --load editor.lisp -- myfile.txt    # open a file
 
 The `--` separator is required: SBCL leaves its own switches in `*posix-argv*`, so it's the only reliable boundary between SBCL flags and your filename.
 
+The editor's source lives in `src/`; `editor.lisp` is a small loader that pulls those files in and starts the editor.
+
 Quitting the editor exits SBCL and returns you straight to the shell.
 
 ## Keys
