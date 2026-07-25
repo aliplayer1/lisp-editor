@@ -47,6 +47,33 @@
 ;;;  10. Key dispatch
 ;;; ---------------------------------------------------------------
 
+(defun key-name (k)
+  "Human-readable name of keycode K for flash messages"
+  (cond
+    ((and (>= k 32) (< k 127)) (string (code-char k)))
+    ((and (>= k 1) (<= k 26))  (format nil "C-~a" (code-char (+ k 96))))
+    (t (format nil "#~a" k))))
+
+(defun dispatch-c-x (k2)
+  "Dispatch the key typed adter the C-x prefix. Returns a handle-key
+   style result. Late features add clauses here (C-x C-e, ...)"
+  (cond
+    ((eql k2 27) nil)
+    (t (format nil " C-x ~a is undefined" (key-name k2)))))
+
+(defun read-c-x-key ()
+  "Show the C-x- prefix on the status bar, read the followup key
+  blocking, and dispatch it."
+  (%move (1- (rows)) 0)
+  (%attron +a-reverse+)
+  (addstr-fit (concatenate 'string " C-x-"
+                           (make-string (cols) :initial-element #\Space))
+              (cols))
+  (%attroff +a-reverse+)
+  (%refresh)
+  (%timeout -1)
+  (dispatch-c-x (%getch)))
+
 (defun handle-key (k)
   (cond
     ;; Meta-prefix: (cons 27 . k2)
@@ -82,7 +109,7 @@
        (when p
          (multiple-value-bind (ok err) (save-file p)
            (if ok (format nil " Saved: ~a" p)
-                  (format nil " ERROR: ~a" err))))))
+               (format nil " ERROR: ~a" err))))))
 
     ((= k +ctrl-o+)
      (let ((a (if (buf-dirty *buf*)
@@ -107,6 +134,7 @@
     ((= k +ctrl-y+)     (yank))
     ((= k +ctrl-k+)     (kill-line))
     ((= k +ctrl-g+)     (clear-mark) " Mark cleared")
+    ((= k +ctrl-x+)     (read-c-x-key))
 
     ((= k +key-up+)    (plain-move #'move-up))
     ((= k +key-down+)  (plain-move #'move-down))
@@ -135,4 +163,3 @@
      (self-insert (code-char k)) nil)
 
     (t nil)))
-

@@ -80,6 +80,7 @@
 (defconstant +ctrl-r+         #o22)
 (defconstant +ctrl-s+         19)
 (defconstant +ctrl-w+         #o27)
+(defconstant +ctrl-x+         24)
 (defconstant +ctrl-y+         #o31)
 (defconstant +ctrl-underscore+ #o37)
 
@@ -105,4 +106,3 @@
 
 (defun addstr-fit (s max-cols)
   (%addstr (subseq s 0 (min (length s) max-cols))))
-
