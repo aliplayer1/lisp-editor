@@ -15,7 +15,7 @@
 
 (let ((here (or *load-truename* *default-pathname-defaults*)))
   (dolist (file '("package" "curses" "buffer" "editing" "region"
-                  "movement" "syntax" "sexp" "render" "keys" "main"))
+                  "movement" "syntax" "sexp" "repl" "render" "keys" "main"))
     (load (merge-pathnames (format nil "src/~a.lisp" file) here))))
 
 (in-package #:ted)
