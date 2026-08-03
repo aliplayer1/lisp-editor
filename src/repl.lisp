@@ -185,7 +185,12 @@
           (setf (repl-shim-path r) path)
           (repl-reset-parser r)
           t)
-      (error () nil))))
+      (error ()
+        ;; The shim file is written before run-program and its path is
+        ;; recorded after, so a failed launch would strand it in /tmp
+        ;; with nothing left holding the name.  Clean it up here.
+        (ignore-errors (delete-file path))
+        nil))))
 
 (defun repl-alive-p ()
   (let ((r *repl*))
