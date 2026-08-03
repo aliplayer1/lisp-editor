@@ -326,3 +326,33 @@
     (:close (walk-paren-backward row col))
     (otherwise nil)))
 
+(defun sexp-before-point ()
+  "Text to evaluate: the active region wrapped in (progn ...), else the
+   expression ENDING at point (a closed form via its matching opener,
+   including any reader-prefix chars, or the atom point sits after).
+   NIL when there is nothing before point."
+  (if (region-active-p)
+      (format nil "(progn ~a)" (region-text))
+      (let* ((row (buf-row *buf*))
+             (col (buf-col *buf*))
+             (ln  (cur-line)))
+        (cond
+          ((and (plusp col)
+                (eq (paren-info row (1- col)) :close))
+           (multiple-value-bind (orow ocol) (walk-paren-backward row (1- col))
+             (when orow
+               (let ((s ocol)
+                     (oline (nth orow (buf-lines *buf*))))
+                 ;; Reach left over 'x, `x, ,x, ,@x, #'x so the prefix
+                 ;; travels with the form it belongs to.
+                 (loop while (and (plusp s)
+                                  (find (char oline (1- s)) "'`,@#"))
+                       do (decf s))
+                 (text-between orow s row col)))))
+          ((and (plusp col) (symbol-char-p (char ln (1- col))))
+           (let ((s (1- col)))
+             (loop while (and (plusp s) (symbol-char-p (char ln (1- s))))
+                   do (decf s))
+             (subseq ln s col)))
+          (t nil)))))
+

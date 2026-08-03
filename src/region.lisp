@@ -53,6 +53,19 @@
            (terpri out)
            (write-string (subseq (nth er (buf-lines *buf*)) 0 ec) out)))))))
 
+(defun text-between (sr sc er ec)
+  "Buffer text from (SR, SC) inclusive to (ER, EC) EXCLUSIVE-column,
+   with embedded newlines, mirroring region-text's conventions."
+  (if (= sr er)
+      (subseq (nth sr (buf-lines *buf*)) sc ec)
+      (with-output-to-string (out)
+        (write-string (subseq (nth sr (buf-lines *buf*)) sc) out)
+        (loop for r from (1+ sr) below er do
+          (terpri out)
+          (write-string (nth r (buf-lines *buf*)) out))
+        (terpri out)
+        (write-string (subseq (nth er (buf-lines *buf*)) 0 ec) out))))
+
 (defun delete-region ()
   "Remove the selected range from the buffer.  Cursor lands at the
    region's start.  Clears the mark.  No-op if no region is active or
