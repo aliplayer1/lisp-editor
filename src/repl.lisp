@@ -251,3 +251,33 @@
     (when (and r (repl-shim-path r))
       (ignore-errors (delete-file (repl-shim-path r)))
       (setf (repl-shim-path r) nil))))
+
+;;; ---------------------------------------------------------------
+;;;  7c. Inferior Lisp: the editor commands
+;;; ---------------------------------------------------------------
+
+(defun eval-last-sexp ()
+  "C-x C-e: send the region or the sexp ending at point to the child
+   for evaluation.  Starts the child on first use.  Asynchronous: the
+   result arrives later via repl-drain."
+  (cond
+    ((and *repl* (repl-pending *repl*) (repl-alive-p))
+     " Still evaluating (C-x C-g interrupts)")
+    (t
+     (let ((text (sexp-before-point)))
+       (cond
+         ((null text) " No expression before point")
+         ((not (repl-ensure-started)) " Cannot start sbcl")
+         (t
+          (let ((r *repl*))
+            (transcript-push-text
+             r (concatenate 'string (repl-package r) "> " text))
+            (if (repl-send text)
+                (progn (setf (repl-pending r) t) " Evaluating...")
+                " REPL process died (C-x r restarts)"))))))))
+
+(defun repl-interrupt-cmd ()
+  "C-x C-g: interrupt the in-flight evaluation, if any."
+  (if (and *repl* (repl-pending *repl*) (repl-alive-p))
+      (progn (repl-interrupt) " Interrupt sent")
+      " No evaluation in progress"))

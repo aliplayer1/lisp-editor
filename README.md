@@ -10,7 +10,7 @@ A small terminal text editor. SBCL + CFFI talking directly to ncurses. No `cl-ch
 
 ## Requirements
 
-- SBCL
+- SBCL, on `PATH` (evaluation launches a second copy as a child process)
 - Quicklisp (for CFFI)
 - `libncursesw`: `sudo apt install libncurses-dev` (Debian/Ubuntu) or `sudo dnf install ncurses-devel` (Fedora)
 
@@ -29,15 +29,19 @@ The editor's source lives in `src/`; `editor.lisp` is a small loader that pulls 
 
 Quitting the editor exits SBCL and returns you straight to the shell.
 
-## Inferior Lisp demo
+## Evaluating Lisp
 
-The editor evaluates Lisp by talking to a child SBCL process over pipes. That part has no keybinding yet, so `repl-check.lisp` is a small demo program that drives it directly, without opening the editor:
+`C-x C-e` sends the expression before the cursor to a child SBCL and shows the value in the status bar. With a region selected it sends the whole selection wrapped in `(progn ...)` instead.
+
+The child starts on first use and stays alive, so definitions persist: evaluate a `defun` and the next expression can call it. Evaluation is asynchronous, so the status bar shows `Evaluating...` and the value replaces it when the child answers; a slow form never freezes the editor. `C-x C-g` interrupts one that is taking too long, and the child survives with its state intact. Errors come back as a message rather than a hung debugger, and the child is shut down when you quit.
+
+This needs `sbcl` on `PATH`, since that is what gets launched as the child.
+
+`repl-check.lisp` drives the same machinery without the UI, which is a quick way to check the connection works at all:
 
 ```sh
 sbcl --script repl-check.lisp
 ```
-
-It starts a child, defines a function in it, calls that function in a second evaluation to show the same process is being reused, and shuts the child down:
 
 ```
 CL-USER> (defun square (n) (* n n))
@@ -45,8 +49,6 @@ CL-USER> (defun square (n) (* n n))
 CL-USER> (square 7)
 => 49
 ```
-
-Add `evaluate` calls to try other expressions. Needs `sbcl` on `PATH` in addition to the requirements above, since that is what gets launched as the child.
 
 ## Keys
 
@@ -76,6 +78,8 @@ Add `evaluate` calls to try other expressions. Needs `sbcl` on `PATH` in additio
 | Ctrl-G | Cancel / clear mark |
 | M-) | Slurp: pull the next s-expression into the enclosing form |
 | M-} | Barf: eject the form's last s-expression past the closer |
+| C-x C-e | Evaluate the expression before the cursor (or the selection) |
+| C-x C-g | Interrupt a running evaluation |
 
 M- is the Meta key: Alt, or Esc followed by the key.
 

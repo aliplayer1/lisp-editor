@@ -31,28 +31,41 @@
     (unwind-protect
         (loop
           (render (when (plusp flash-ttl) flash))
-          (when (plusp flash-ttl) (decf flash-ttl))
-          (let* ((k      (read-key))
-                 (result (handle-key k)))
-            (setf *last-cmd-was-insert*
-                  (and (integerp k) (>= k 32) (< k 127)))
-            (setf *last-cmd-was-kill*
-                  (or (and (integerp k) (or (= k +ctrl-k+) (= k +ctrl-w+)))
-                      (and (consp k)
-                           (let ((c (cdr k)))
-                             (or (eql c (char-code #\w))
-                                 (eql c (char-code #\d))
-                                 (eql c 127) (eql c 8)
-                                 (eql c +key-backspace+))))))
-            (setf *last-cmd-was-delete*
-                  (and (integerp k)
-                       (or (= k 127) (= k 8) (= k +key-backspace+)
-                           (= k +key-dc+) (= k +ctrl-d+))))
-            (cond
-              ((eq result :quit) (return))
-              ((stringp result)
-               (setf flash result flash-ttl 4)))))
-      (%endwin))))
+          ;; Poll while a child Lisp is alive so its output shows up
+          ;; between keystrokes; block indefinitely when there is none.
+          (%timeout (if (repl-alive-p) 100 -1))
+          (let ((k (read-key)))
+            (if (eql k -1)
+                ;; Timeout tick: no key was pressed, so only drain the
+                ;; child.  Deliberately does NOT age the flash (ten
+                ;; ticks a second would erase every message in 0.4s) and
+                ;; does NOT touch the *last-cmd-was-* flags, which would
+                ;; break insert and kill coalescing while you type.
+                (let ((fl (repl-drain)))
+                  (when fl (setf flash fl flash-ttl 4)))
+                (let ((result (handle-key k)))
+                  (when (plusp flash-ttl) (decf flash-ttl))
+                  (setf *last-cmd-was-insert*
+                        (and (integerp k) (>= k 32) (< k 127)))
+                  (setf *last-cmd-was-kill*
+                        (or (and (integerp k) (or (= k +ctrl-k+) (= k +ctrl-w+)))
+                            (and (consp k)
+                                 (let ((c (cdr k)))
+                                   (or (eql c (char-code #\w))
+                                       (eql c (char-code #\d))
+                                       (eql c 127) (eql c 8)
+                                       (eql c +key-backspace+))))))
+                  (setf *last-cmd-was-delete*
+                        (and (integerp k)
+                             (or (= k 127) (= k 8) (= k +key-backspace+)
+                                 (= k +key-dc+) (= k +ctrl-d+))))
+                  (cond
+                    ((eq result :quit) (return))
+                    ((stringp result) (setf flash result flash-ttl 4)))
+                  (let ((fl (repl-drain)))
+                    (when fl (setf flash fl flash-ttl 4)))))))
+      ;; Kill the child too: it would otherwise outlive a crash here.
+      (progn (%endwin) (repl-kill)))))
 
 (defun main ()
   ;; Filename comes after a `--' separator, per the docstring at top.

@@ -7,6 +7,10 @@
 ;;; ---------------------------------------------------------------
 
 (defun mini-prompt (prompt-str)
+  ;; Force blocking reads: the main loop leaves a 100 ms timeout set
+  ;; while a child Lisp is alive, which would spin this loop redrawing
+  ;; the prompt ten times a second.  read-c-x-key does the same.
+  (%timeout -1)
   (let ((input ""))
     (loop
       (%move (1- (rows)) 0)
@@ -58,6 +62,8 @@
   "Dispatch the key typed adter the C-x prefix. Returns a handle-key
    style result. Late features add clauses here (C-x C-e, ...)"
   (cond
+    ((eql k2 +ctrl-e+) (eval-last-sexp))
+    ((eql k2 +ctrl-g+) (repl-interrupt-cmd))
     ((eql k2 27) nil)
     (t (format nil " C-x ~a is undefined" (key-name k2)))))
 
