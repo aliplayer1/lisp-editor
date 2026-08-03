@@ -29,6 +29,25 @@ The editor's source lives in `src/`; `editor.lisp` is a small loader that pulls 
 
 Quitting the editor exits SBCL and returns you straight to the shell.
 
+## Inferior Lisp demo
+
+The editor evaluates Lisp by talking to a child SBCL process over pipes. That part has no keybinding yet, so `repl-check.lisp` is a small demo program that drives it directly, without opening the editor:
+
+```sh
+sbcl --script repl-check.lisp
+```
+
+It starts a child, defines a function in it, calls that function in a second evaluation to show the same process is being reused, and shuts the child down:
+
+```
+CL-USER> (defun square (n) (* n n))
+=> SQUARE
+CL-USER> (square 7)
+=> 49
+```
+
+Add `evaluate` calls to try other expressions. Needs `sbcl` on `PATH` in addition to the requirements above, since that is what gets launched as the child.
+
 ## Keys
 
 | Key | Action |
