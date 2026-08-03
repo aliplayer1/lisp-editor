@@ -105,3 +105,144 @@
           do (let ((f (repl-ingest-char r ch)))
                (when f (setf flash f))))
     flash))
+
+;;; ---------------------------------------------------------------
+;;;  7b. Inferior Lisp: the shim and the child process
+;;; ---------------------------------------------------------------
+
+(defparameter *shim-forms*
+  '((defun ted-pkg-name ()
+      (let ((names (cons (package-name *package*)
+                         (package-nicknames *package*))))
+        (first (sort (copy-list names) #'< :key #'length))))
+    (defun ted-shim-loop ()
+      (loop
+        (format t "~cP~a~c" (code-char 1) (ted-pkg-name) (code-char 2))
+        (force-output)
+        (let ((form (handler-case (read *standard-input* nil :ted-eof)
+                      (error (e)
+                        (clear-input)
+                        (format t "~cE~a~c" (code-char 1) e (code-char 2))
+                        (force-output)
+                        :ted-read-error))))
+          (cond
+            ((eq form :ted-eof) (sb-ext:exit))
+            ((eq form :ted-read-error) nil)
+            (t
+             (handler-case
+                 (let ((vals (multiple-value-list (eval form))))
+                   (force-output)
+                   (format t "~cR~{~s~^, ~}~c" (code-char 1) vals (code-char 2)))
+               ;; interactive-interrupt is a serious-condition but NOT an
+               ;; error, so the clause below would not catch it: without
+               ;; this one, --disable-debugger kills the child on C-c.
+               (sb-sys:interactive-interrupt ()
+                 (format t "~cEInterrupted~c" (code-char 1) (code-char 2)))
+               (error (e)
+                 (format t "~cE~a~c" (code-char 1) e (code-char 2))))
+             (force-output))))))
+    (ted-shim-loop))
+  "The child's replacement toplevel, kept as data and printed to a temp
+   file at launch.  See write-shim-file for the package-printing rule.")
+
+(defun write-shim-file (path)
+  (with-open-file (s path :direction :output :if-exists :supersede
+                          :if-does-not-exist :create)
+    (with-standard-io-syntax
+      ;; Print with *package* = TED so TED-homed symbols print bare and
+      ;; the child (reading in its CL-USER) interns them locally.  This
+      ;; LET must stay INSIDE with-standard-io-syntax, which binds
+      ;; *package* to CL-USER itself.
+      (let ((*package* (find-package :ted)))
+        (dolist (form *shim-forms*)
+          (prin1 form s)
+          (terpri s))))))
+
+(defun repl-reset-parser (r)
+  (setf (repl-parse-state r) :text
+        (repl-frame-type r) nil
+        (fill-pointer (repl-frame-acc r)) 0
+        (fill-pointer (repl-line-acc r)) 0
+        (repl-pending r) nil
+        (repl-dead r) nil))
+
+(defun repl-start ()
+  "Launch the child SBCL with the shim.  Reuses *repl* (keeping the
+   transcript) across restarts.  Returns T on success, NIL if sbcl
+   could not be started."
+  (let ((r (or *repl* (setf *repl* (make-repl))))
+        (path (format nil "/tmp/ted-shim-~d-~d.lisp"
+                      (get-universal-time) (random 1000000))))
+    (handler-case
+        (progn
+          (write-shim-file path)
+          (setf (repl-process r)
+                (sb-ext:run-program
+                 "sbcl"
+                 (list "--noinform" "--disable-debugger" "--load" path)
+                 :search t :wait nil
+                 :input :stream :output :stream :error :output))
+          (setf (repl-shim-path r) path)
+          (repl-reset-parser r)
+          t)
+      (error () nil))))
+
+(defun repl-alive-p ()
+  (let ((r *repl*))
+    (and r (repl-process r) (not (repl-dead r))
+         (eq (sb-ext:process-status (repl-process r)) :running))))
+
+(defun repl-ensure-started ()
+  (or (repl-alive-p) (repl-start)))
+
+(defun repl-send (text)
+  "Write TEXT as a line to the child's stdin.  Returns T, or NIL after
+   marking the connection dead on a broken pipe.  Callers must have gone
+   through repl-ensure-started: this assumes *repl* is non-NIL."
+  (handler-case
+      (let ((in (sb-ext:process-input (repl-process *repl*))))
+        (write-line text in)
+        (force-output in)
+        t)
+    (error () (setf (repl-dead *repl*) t) nil)))
+
+(defun repl-drain ()
+  "Read whatever the child has written, bounded per call so a
+   fast-printing child cannot starve the UI.  Returns the last
+   result/error flash produced, or NIL."
+  (let ((r *repl*) (flash nil))
+    (when (and r (repl-process r) (not (repl-dead r)))
+      (let ((out (sb-ext:process-output (repl-process r))))
+        (handler-case
+            (loop repeat 65536
+                  for ch = (read-char-no-hang out nil :eof)
+                  while ch
+                  do (if (eq ch :eof)
+                         (progn (setf (repl-dead r) t)
+                                (repl-flush-line r)
+                                (transcript-push r "[repl process exited]")
+                                (setf flash " REPL process died (C-x r restarts)")
+                                (return))
+                         (let ((f (repl-ingest-char r ch)))
+                           (when f (setf flash f)))))
+          (error () (setf (repl-dead r) t)))))
+    flash))
+
+(defun repl-interrupt ()
+  "SIGINT the child; its shim reports the abort as an E frame."
+  (when (repl-alive-p)
+    (ignore-errors (sb-ext:process-kill (repl-process *repl*) 2))))
+
+(defun repl-kill ()
+  "Terminate the child (TERM + wait) and delete the shim temp file.
+   Safe to call at any time, including with no child."
+  (let ((r *repl*))
+    (when (and r (repl-process r))
+      (ignore-errors
+        (when (eq (sb-ext:process-status (repl-process r)) :running)
+          (sb-ext:process-kill (repl-process r) 15)
+          (sb-ext:process-wait (repl-process r))))
+      (setf (repl-dead r) t))
+    (when (and r (repl-shim-path r))
+      (ignore-errors (delete-file (repl-shim-path r)))
+      (setf (repl-shim-path r) nil))))
